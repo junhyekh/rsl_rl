@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Optional, List
+
 import torch
 import torch.nn as nn
 
@@ -25,12 +27,53 @@ class ActorCriticRecurrent(ActorCritic):
         rnn_hidden_size=256,
         rnn_num_layers=1,
         init_noise_std=1.0,
+        base_hidden_dims: Optional[List[int]] = None,
         **kwargs,
     ):
         if kwargs:
             print(
                 "ActorCriticRecurrent.__init__ got unexpected arguments, which will be ignored: " + str(kwargs.keys()),
             )
+
+        
+        if base_hidden_dims is not None:
+            base_activation = get_activation(activation)
+
+            actor_base_layers = []
+            critic_base_layers = []
+
+            actor_base_layers.append(nn.Linear(num_actor_obs, base_hidden_dims[0]))
+            actor_base_layers.append(base_activation)
+
+            critic_base_layers.append(nn.Linear(num_critic_obs, base_hidden_dims[0]))
+            critic_base_layers.append(base_activation)
+
+            for layer_index in range(len(base_hidden_dims)):
+                if layer_index == len(base_hidden_dims) - 1:
+                    actor_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                                rnn_hidden_size))
+                    actor_base_layers.append(base_activation)
+                    critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                               rnn_hidden_size))
+                    critic_base_layers.append(base_activation)
+                else:
+                    actor_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                                base_hidden_dims[layer_index + 1]))
+                    actor_base_layers.append(base_activation)
+                    critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                                base_hidden_dims[layer_index + 1]))
+                    critic_base_layers.append(base_activation)
+
+            self.actor_base = nn.Sequential(*actor_base_layers)
+            self.critic_base = nn.Sequential(*critic_base_layers)
+            memory_a_input_dim = rnn_hidden_size
+            memory_c_input_dim = rnn_hidden_size
+
+        else:
+            self.actor_base = None
+            self.critic_base = None
+            memory_a_input_dim = num_actor_obs
+            memory_c_input_dim = num_critic_obs
 
         super().__init__(
             num_actor_obs=rnn_hidden_size,
@@ -42,10 +85,8 @@ class ActorCriticRecurrent(ActorCritic):
             init_noise_std=init_noise_std,
         )
 
-        activation = get_activation(activation)
-
-        self.memory_a = Memory(num_actor_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
-        self.memory_c = Memory(num_critic_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+        self.memory_a = Memory(memory_a_input_dim, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+        self.memory_c = Memory(memory_c_input_dim, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
 
         print(f"Actor RNN: {self.memory_a}")
         print(f"Critic RNN: {self.memory_c}")
@@ -55,14 +96,20 @@ class ActorCriticRecurrent(ActorCritic):
         self.memory_c.reset(dones)
 
     def act(self, observations, masks=None, hidden_states=None):
+        if self.actor_base is not None:
+            observations = self.actor_base(observations)
         input_a = self.memory_a(observations, masks, hidden_states)
         return super().act(input_a.squeeze(0))
 
     def act_inference(self, observations):
+        if self.actor_base is not None:
+            observations = self.actor_base(observations)
         input_a = self.memory_a(observations)
         return super().act_inference(input_a.squeeze(0))
 
     def evaluate(self, critic_observations, masks=None, hidden_states=None):
+        if self.critic_base is not None:
+            critic_observations = self.critic_base(critic_observations)
         input_c = self.memory_c(critic_observations, masks, hidden_states)
         return super().evaluate(input_c.squeeze(0))
 

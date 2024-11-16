@@ -72,9 +72,10 @@ class ActorCritic(nn.Module):
 
     @staticmethod
     # not used at the moment
-    def init_weights(sequential, scales):
+    def init_weights(sequential, scales=None):
+        f = lambda l, idx: l[idx] if l is not None and idx < len(l) else 1.0
         [
-            torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
+            torch.nn.init.orthogonal_(module.weight, gain=f(scales, idx))
             for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
         ]
 
