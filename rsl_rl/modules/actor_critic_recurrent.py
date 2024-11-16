@@ -34,8 +34,16 @@ class ActorCriticRecurrent(ActorCritic):
             print(
                 "ActorCriticRecurrent.__init__ got unexpected arguments, which will be ignored: " + str(kwargs.keys()),
             )
+        super().__init__(
+            num_actor_obs=rnn_hidden_size,
+            num_critic_obs=rnn_hidden_size,
+            num_actions=num_actions,
+            actor_hidden_dims=actor_hidden_dims,
+            critic_hidden_dims=critic_hidden_dims,
+            activation=activation,
+            init_noise_std=init_noise_std,
+        )
 
-        
         if base_hidden_dims is not None:
             base_activation = get_activation(activation)
 
@@ -63,7 +71,6 @@ class ActorCriticRecurrent(ActorCritic):
                     critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
                                                 base_hidden_dims[layer_index + 1]))
                     critic_base_layers.append(base_activation)
-
             self.actor_base = nn.Sequential(*actor_base_layers)
             self.critic_base = nn.Sequential(*critic_base_layers)
             memory_a_input_dim = rnn_hidden_size
@@ -75,18 +82,12 @@ class ActorCriticRecurrent(ActorCritic):
             memory_a_input_dim = num_actor_obs
             memory_c_input_dim = num_critic_obs
 
-        super().__init__(
-            num_actor_obs=rnn_hidden_size,
-            num_critic_obs=rnn_hidden_size,
-            num_actions=num_actions,
-            actor_hidden_dims=actor_hidden_dims,
-            critic_hidden_dims=critic_hidden_dims,
-            activation=activation,
-            init_noise_std=init_noise_std,
-        )
-
         self.memory_a = Memory(memory_a_input_dim, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
         self.memory_c = Memory(memory_c_input_dim, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+
+        if self.actor_base is not None:
+            print(f"Actor Base: {self.actor_base}")
+            print(f"Critic Base: {self.critic_base}")
 
         print(f"Actor RNN: {self.memory_a}")
         print(f"Critic RNN: {self.memory_c}")
