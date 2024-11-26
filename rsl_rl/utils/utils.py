@@ -84,3 +84,12 @@ def store_code_state(logdir, repositories) -> list:
         # add the file path to the list of files to be uploaded
         file_paths.append(diff_file_name)
     return file_paths
+
+def _map(s, **kwargs):
+    if isinstance(s, dict):
+        out = dict(s)
+        for k,v in out.items():
+            out[k] = v.to(**kwargs)
+        return out
+    else:
+        return s.to(**kwargs)

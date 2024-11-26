@@ -13,8 +13,8 @@ from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 import rsl_rl
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization
-from rsl_rl.utils import store_code_state
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization, ActorCriticRange
+from rsl_rl.utils import store_code_state, _map
 
 
 class OnPolicyRunner:
@@ -27,13 +27,17 @@ class OnPolicyRunner:
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()
-        num_obs = obs.shape[1]
+        if isinstance(obs, dict):
+            n_envs = self.env.num_envs
+            num_obs = {k: tuple(v.shape[1:]) for k,v in obs.items()}
+        else:
+            num_obs = obs.shape[1]
         if "critic" in extras["observations"]:
             num_critic_obs = extras["observations"]["critic"].shape[1]
         else:
             num_critic_obs = num_obs
         actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
-        actor_critic: ActorCritic | ActorCriticRecurrent = actor_critic_class(
+        actor_critic: ActorCritic | ActorCriticRecurrent | ActorCriticRange = actor_critic_class(
             num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
         alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
@@ -41,9 +45,13 @@ class OnPolicyRunner:
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.empirical_normalization = self.cfg["empirical_normalization"]
+        if isinstance(num_obs, int):
+            num_obs = [num_obs]
+        if isinstance(num_critic_obs, int):
+            num_critic_obs = [num_critic_obs]
         if self.empirical_normalization:
-            self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8).to(self.device)
-            self.critic_obs_normalizer = EmpiricalNormalization(shape=[num_critic_obs], until=1.0e8).to(self.device)
+            self.obs_normalizer = EmpiricalNormalization(shape=num_obs, until=1.0e8).to(self.device)
+            self.critic_obs_normalizer = EmpiricalNormalization(shape=num_critic_obs, until=1.0e8).to(self.device)
         else:
             self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
             self.critic_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
@@ -51,8 +59,8 @@ class OnPolicyRunner:
         self.alg.init_storage(
             self.env.num_envs,
             self.num_steps_per_env,
-            [num_obs],
-            [num_critic_obs],
+            num_obs,
+            num_critic_obs,
             [self.env.num_actions],
         )
 
@@ -92,7 +100,8 @@ class OnPolicyRunner:
             )
         obs, extras = self.env.get_observations()
         critic_obs = extras["observations"].get("critic", obs)
-        obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
+        obs, critic_obs = _map(obs,device=self.device), _map(critic_obs,device=self.device)
+        # obs.to(self.device), critic_obs.to(self.device)
         self.train_mode()  # switch to train mode (for dropout for example)
 
         ep_infos = []
@@ -112,10 +121,10 @@ class OnPolicyRunner:
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # move to the right device
                     obs, critic_obs, rewards, dones = (
-                        obs.to(self.device),
-                        critic_obs.to(self.device),
-                        rewards.to(self.device),
-                        dones.to(self.device),
+                        _map(obs,device=self.device),
+                        _map(critic_obs,device=self.device),
+                        _map(rewards,device=self.device),
+                        _map(dones,device=self.device),
                     )
                     # perform normalization
                     obs = self.obs_normalizer(obs)

@@ -3,11 +3,37 @@
 
 
 from __future__ import annotations
+from collections.abc import Sequence
 
 import torch
 
 from rsl_rl.utils import split_and_pad_trajectories
 
+def _copy(s, t, i):
+    if isinstance(t, dict):
+        for k,v in t.items():
+            s[k][i].copy_(v)
+    else:
+        s[i].copy_(t)
+
+def _flatten(s):
+    if isinstance(s, dict):
+        out = dict(s)
+        for k,v in out.items():
+            out[k] = v.flatten(0, 1)
+        return out
+    else:
+        return s.flatten(0, 1)
+    
+def _get(s, i):
+    if isinstance(s, dict):
+        out = {}
+        for k,v in s.items():
+            out[k] = v[i]
+        return out
+    else:
+        return s[i]
+    
 
 class RolloutStorage:
     class Transition:
@@ -34,11 +60,28 @@ class RolloutStorage:
         self.actions_shape = actions_shape
 
         # Core
-        self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
-        if privileged_obs_shape[0] is not None:
-            self.privileged_observations = torch.zeros(
-                num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device
-            )
+        if isinstance(obs_shape, dict):
+            self.observations = {k: torch.zeros(num_transitions_per_env,
+                                            num_envs,
+                                            *v,
+                                            device=self.device)
+                                            for k,v in obs_shape.items()}
+        else:
+            self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+        if ((isinstance(privileged_obs_shape, Sequence)
+             and privileged_obs_shape[0] is not None) 
+            or (isinstance(privileged_obs_shape, dict)
+                and next(iter(privileged_obs_shape)) is not None)):
+            if isinstance(privileged_obs_shape, dict):
+                self.privileged_observations= {k: torch.zeros(num_transitions_per_env,
+                                            num_envs,
+                                            *v,
+                                            device=self.device)
+                                            for k,v in privileged_obs_shape.items()}
+            else:
+                self.privileged_observations = torch.zeros(
+                    num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device
+                )
         else:
             self.privileged_observations = None
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
@@ -65,9 +108,10 @@ class RolloutStorage:
     def add_transitions(self, transition: Transition):
         if self.step >= self.num_transitions_per_env:
             raise AssertionError("Rollout buffer overflow")
-        self.observations[self.step].copy_(transition.observations)
+        _copy(self.observations, transition.observations, self.step)
         if self.privileged_observations is not None:
-            self.privileged_observations[self.step].copy_(transition.critic_observations)
+            _copy(self.privileged_observations,
+                  transition.critic_observations, self.step)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
@@ -132,9 +176,9 @@ class RolloutStorage:
         mini_batch_size = batch_size // num_mini_batches
         indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
 
-        observations = self.observations.flatten(0, 1)
+        observations = _flatten(self.observations)
         if self.privileged_observations is not None:
-            critic_observations = self.privileged_observations.flatten(0, 1)
+            critic_observations = _flatten(self.privileged_observations)
         else:
             critic_observations = observations
 
@@ -152,8 +196,10 @@ class RolloutStorage:
                 end = (i + 1) * mini_batch_size
                 batch_idx = indices[start:end]
 
-                obs_batch = observations[batch_idx]
-                critic_observations_batch = critic_observations[batch_idx]
+                # obs_batch = observations[batch_idx]
+                obs_batch = _get(observations, batch_idx)
+                critic_observations_batch = _get(critic_observations, batch_idx)
+                # critic_observations_batch = critic_observations[batch_idx]
                 actions_batch = actions[batch_idx]
                 target_values_batch = values[batch_idx]
                 returns_batch = returns[batch_idx]

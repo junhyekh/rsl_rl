@@ -6,5 +6,8 @@
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .normalizer import EmpiricalNormalization
+from .util import *
+from .network import *
+from .actor_critic_range import ActorCriticRange
 
-__all__ = ["ActorCritic", "ActorCriticRecurrent"]
+__all__ = ["ActorCritic", "ActorCriticRecurrent", "ActorCriticRange"]
