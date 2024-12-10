@@ -25,6 +25,7 @@ class ActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
+        use_layernorm=False,
         **kwargs,
     ):
         if kwargs:
@@ -46,6 +47,8 @@ class ActorCritic(nn.Module):
                 actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
             else:
                 actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
+                if use_layernorm:
+                    actor_layers.append(nn.LayerNorm(actor_hidden_dims[layer_index + 1]))
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
@@ -58,6 +61,8 @@ class ActorCritic(nn.Module):
                 critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], 1))
             else:
                 critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
+                if use_layernorm:
+                    critic_layers.append(nn.LayerNorm(critic_hidden_dims[layer_index + 1]))
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
 

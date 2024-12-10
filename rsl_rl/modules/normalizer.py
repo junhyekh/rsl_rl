@@ -48,10 +48,19 @@ class EmpiricalNormalization(nn.Module):
         Returns:
             ndarray or Variable: Normalized output values
         """
-
-        if self.training:
-            self.update(x)
-        return (x - self._mean) / (self._std + self.eps)
+        if isinstance(x, Mapping):
+            x = dict(x)
+            if self.training:
+                self.update(x)
+            for k,v in x.items():
+                _mean = getattr(self, f'{k}_mean')
+                _std = getattr(self, f'{k}_std')
+                x[k] = (v - _mean) / (_std + self.eps)
+            return x
+        else:
+            if self.training:
+                self.update(x)
+            return (x - self._mean) / (self._std + self.eps)
 
     @torch.jit.unused
     def update(self, x):

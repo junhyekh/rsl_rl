@@ -27,6 +27,8 @@ class ActorCriticRecurrent(ActorCritic):
         rnn_hidden_size=256,
         rnn_num_layers=1,
         init_noise_std=1.0,
+        base_hidden_dims: Optional[List[int]] = None,
+        use_layernorm: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -44,10 +46,50 @@ class ActorCriticRecurrent(ActorCritic):
             init_noise_std=init_noise_std,
         )
 
-        activation = resolve_nn_activation(activation)
+        if base_hidden_dims is not None:
+            base_activation = resolve_nn_activation(activation)
 
-        self.memory_a = Memory(num_actor_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
-        self.memory_c = Memory(num_critic_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+            actor_base_layers = []
+            critic_base_layers = []
+
+            actor_base_layers.append(nn.Linear(num_actor_obs, base_hidden_dims[0]))
+            actor_base_layers.append(base_activation)
+
+            critic_base_layers.append(nn.Linear(num_critic_obs, base_hidden_dims[0]))
+            critic_base_layers.append(base_activation)
+
+            for layer_index in range(len(base_hidden_dims)):
+                if layer_index == len(base_hidden_dims) - 1:
+                    actor_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                                rnn_hidden_size))
+                    actor_base_layers.append(base_activation)
+                    critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                               rnn_hidden_size))
+                    critic_base_layers.append(base_activation)
+                else:
+                    actor_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                                base_hidden_dims[layer_index + 1]))
+                    actor_base_layers.append(base_activation)
+                    critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
+                                                base_hidden_dims[layer_index + 1]))
+                    critic_base_layers.append(base_activation)
+            self.actor_base = nn.Sequential(*actor_base_layers)
+            self.critic_base = nn.Sequential(*critic_base_layers)
+            memory_a_input_dim = rnn_hidden_size
+            memory_c_input_dim = rnn_hidden_size
+
+        else:
+            self.actor_base = None
+            self.critic_base = None
+            memory_a_input_dim = num_actor_obs
+            memory_c_input_dim = num_critic_obs
+
+        self.memory_a = Memory(memory_a_input_dim, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+        self.memory_c = Memory(memory_c_input_dim, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_size)
+
+        if self.actor_base is not None:
+            print(f"Actor Base: {self.actor_base}")
+            print(f"Critic Base: {self.critic_base}")
 
         print(f"Actor RNN: {self.memory_a}")
         print(f"Critic RNN: {self.memory_c}")
