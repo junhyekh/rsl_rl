@@ -66,7 +66,8 @@ class EmpiricalNormalization(nn.Module):
         """
         if isinstance(x, Mapping):
             x = dict(x)
-            self.update(x)
+            if self.training:
+                self.update(x)
             for k,v in x.items():
                 _mean = getattr(self, f'{k}_mean')
                 _std = getattr(self, f'{k}_std')

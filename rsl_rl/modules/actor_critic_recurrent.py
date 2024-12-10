@@ -28,6 +28,7 @@ class ActorCriticRecurrent(ActorCritic):
         rnn_num_layers=1,
         init_noise_std=1.0,
         base_hidden_dims: Optional[List[int]] = None,
+        use_layernorm: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -51,25 +52,35 @@ class ActorCriticRecurrent(ActorCritic):
             critic_base_layers = []
 
             actor_base_layers.append(nn.Linear(num_actor_obs, base_hidden_dims[0]))
+            if use_layernorm:
+                actor_base_layers.append(nn.LayerNorm(base_hidden_dims[0]))
             actor_base_layers.append(base_activation)
 
             critic_base_layers.append(nn.Linear(num_critic_obs, base_hidden_dims[0]))
+            if use_layernorm:
+                critic_base_layers.append(nn.LayerNorm(base_hidden_dims[0]))
             critic_base_layers.append(base_activation)
 
             for layer_index in range(len(base_hidden_dims)):
                 if layer_index == len(base_hidden_dims) - 1:
                     actor_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
                                                 rnn_hidden_size))
+                    if use_layernorm:
+                        actor_base_layers.append(nn.LayerNorm(rnn_hidden_size))
                     actor_base_layers.append(base_activation)
                     critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
                                                rnn_hidden_size))
+                    if use_layernorm:
+                        critic_base_layers.append(nn.LayerNorm(rnn_hidden_size))
                     critic_base_layers.append(base_activation)
                 else:
                     actor_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
                                                 base_hidden_dims[layer_index + 1]))
+                    actor_base_layers.append(nn.LayerNorm(base_hidden_dims[layer_index + 1]))
                     actor_base_layers.append(base_activation)
                     critic_base_layers.append(nn.Linear(base_hidden_dims[layer_index],
                                                 base_hidden_dims[layer_index + 1]))
+                    critic_base_layers.append(nn.LayerNorm(base_hidden_dims[layer_index + 1]))
                     critic_base_layers.append(base_activation)
             self.actor_base = nn.Sequential(*actor_base_layers)
             self.critic_base = nn.Sequential(*critic_base_layers)
