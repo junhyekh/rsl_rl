@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+from torch.distributions import Normal, Categorical, Independent
+from rsl_rl.modules.util import CategoricalMasked, get_activation
 
 
 class ActorCritic(nn.Module):
@@ -22,6 +23,8 @@ class ActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         use_layernorm=False,
+        is_discrete=False,
+        is_multi_discrete=False,
         **kwargs,
     ):
         if kwargs:
@@ -31,6 +34,28 @@ class ActorCritic(nn.Module):
             )
         super().__init__()
         activation = get_activation(activation)
+
+        self._is_discrete = is_discrete
+        self._is_multi_discrete = is_multi_discrete
+        self.is_continuous = (not (is_discrete or is_multi_discrete))
+        if is_discrete:
+            num_actions = num_actions[0]
+        elif is_multi_discrete:
+            max_len = max(list(num_actions))
+            n_actions = len(num_actions)
+            self._require_mask = len(set(num_actions))>1
+            if self._require_mask:
+                mask = torch.zeros(
+                    n_actions, max_len,
+                    dtype=torch.bool
+                ) 
+                for i, dim in enumerate(num_actions):
+                    mask[i, :dim] = 1
+                self._mask = nn.Parameter(mask[None],
+                                        requires_grad=False
+                                        )
+            num_actions = max_len * n_actions
+            self._action_shape = (n_actions, max_len)
 
         mlp_input_dim_a = num_actor_obs
         mlp_input_dim_c = num_critic_obs
@@ -69,7 +94,10 @@ class ActorCritic(nn.Module):
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
         # disable args validation for speedup
-        Normal.set_default_validate_args = False
+        if is_discrete or is_multi_discrete:
+            pass
+        else:
+            Normal.set_default_validate_args = False
 
         # seems that we get better performance without init
         # self.init_memory_weights(self.memory_a, 0.001, 0.)
@@ -97,14 +125,32 @@ class ActorCritic(nn.Module):
     @property
     def action_std(self):
         return self.distribution.stddev
+    
+    @property
+    def action_logit(self):
+        return self.distribution.logits
+    @property
+    def action_prob(self):
+        return self.distribution.probs
 
     @property
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
     def update_distribution(self, observations):
-        mean = self.actor(observations)
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
+        if self._is_discrete:
+            logits = self.actor(observations)
+            self.distribution = Categorical(logits=logits)
+        elif self._is_multi_discrete:
+            logits = self.actor(observations).view(-1, *self._action_shape)
+            if self._require_mask:
+                self.distribution = CategoricalMasked(logits=logits,
+                                                    masks=self._mask)
+            else:
+                self.distribution = Categorical(logits=logits)
+        else:
+            mean = self.actor(observations)
+            self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
@@ -114,29 +160,22 @@ class ActorCritic(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
-        actions_mean = self.actor(observations)
-        return actions_mean
+        if self._is_discrete:
+            logits = self.actor(observations)
+            return logits.amax(-1)
+        elif self._is_multi_discrete:
+            logits = self.actor(observations).view(-1, *self._action_shape)
+            if self._require_mask:
+                logits = torch.where(self._mask,
+                                    logits,
+                                    torch.tensor(-1e+8).to(observations.device))
+            return logits.amax(-1)
+        else:
+            actions_mean = self.actor(observations)
+            return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
         return value
 
 
-def get_activation(act_name):
-    if act_name == "elu":
-        return nn.ELU()
-    elif act_name == "selu":
-        return nn.SELU()
-    elif act_name == "relu":
-        return nn.ReLU()
-    elif act_name == "crelu":
-        return nn.CReLU()
-    elif act_name == "lrelu":
-        return nn.LeakyReLU()
-    elif act_name == "tanh":
-        return nn.Tanh()
-    elif act_name == "sigmoid":
-        return nn.Sigmoid()
-    else:
-        print("invalid activation function!")
-        return None

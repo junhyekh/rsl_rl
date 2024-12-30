@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
@@ -55,9 +56,9 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, is_discrete):
         self.storage = RolloutStorage(
-            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device
+            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, is_discrete, self.device
         )
 
     def test_mode(self):
@@ -73,8 +74,11 @@ class PPO:
         self.transition.actions = self.actor_critic.act(obs).detach()
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
-        self.transition.action_sigma = self.actor_critic.action_std.detach()
+        if self.actor_critic.is_continuous:
+            self.transition.action_mean = self.actor_critic.action_mean.detach()
+            self.transition.action_sigma = self.actor_critic.action_std.detach()
+        else:
+            self.transition.action_logit = self.actor_critic.action_logit.detach()
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
@@ -117,26 +121,39 @@ class PPO:
             old_sigma_batch,
             hid_states_batch,
             masks_batch,
+            old_logit_batch,
         ) in generator:
             self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
             value_batch = self.actor_critic.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
             )
-            mu_batch = self.actor_critic.action_mean
-            sigma_batch = self.actor_critic.action_std
+            if self.actor_critic.is_continuous:
+                mu_batch = self.actor_critic.action_mean
+                sigma_batch = self.actor_critic.action_std
+            else:
+                logit_batch = self.actor_critic.action_logit
             entropy_batch = self.actor_critic.entropy
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.inference_mode():
-                    kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
-                        + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
-                        / (2.0 * torch.square(sigma_batch))
-                        - 0.5,
-                        axis=-1,
-                    )
+                    if not self.actor_critic.is_continuous:
+                        old_probs = F.softmax(old_logit_batch, dim=-1)
+                        t = old_probs * (old_logit_batch- logit_batch)
+                        # is necessary? since for the masking part
+                        # old_logit_batch = logit_batch << 0
+                        # t[(probs_batch == 0).expand_as(t)] = torch.inf
+                        kl = t.sum(-1)
+                    else:
+                        kl = torch.sum(
+                            torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
+                            + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
+                            / (2.0 * torch.square(sigma_batch))
+                            - 0.5,
+                            axis=-1,
+                        )
+
                     kl_mean = torch.mean(kl)
 
                     if kl_mean > self.desired_kl * 2.0:

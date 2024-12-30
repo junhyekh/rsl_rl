@@ -7,7 +7,26 @@ import numpy as np
 from flash_attn.modules.mha import MHA
 import einops
 
-from rsl_rl.modules.actor_critic import get_activation
+from torch.distributions import Categorical, Independent 
+
+def get_activation(act_name):
+    if act_name == "elu":
+        return nn.ELU()
+    elif act_name == "selu":
+        return nn.SELU()
+    elif act_name == "relu":
+        return nn.ReLU()
+    elif act_name == "crelu":
+        return nn.CReLU()
+    elif act_name == "lrelu":
+        return nn.LeakyReLU()
+    elif act_name == "tanh":
+        return nn.Tanh()
+    elif act_name == "sigmoid":
+        return nn.Sigmoid()
+    else:
+        print("invalid activation function!")
+        return None
 
 def merge_shapes(*dims) -> Tuple[int, ...]:
     """
@@ -129,3 +148,27 @@ class MHAWrapper(MHA):
         o = super().forward(q, m)
         o = o.reshape(*s[:-2], *o.shape[-2:])
         return o
+
+class CategoricalMasked(Categorical):
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=None):
+        self.masks = masks
+        if masks is None:
+            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+        else:
+            self.device = self.masks.device
+            logits = th.where(self.masks, logits, th.tensor(-1e+8).to(self.device))
+            super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+    
+    def rsample(self):
+        u = th.distributions.Uniform(low=th.zeros_like(self.logits, device = self.logits.device),
+                                     high=th.ones_like(self.logits, device = self.logits.device)).sample()
+        #print(u.size(), self.logits.size())
+        rand_logits = self.logits -(-u.log()).log()
+        return th.max(rand_logits, axis=-1)[1]
+
+    def entropy(self):
+        if self.masks is None:
+            return super(CategoricalMasked, self).entropy()
+        p_log_p = self.logits * self.probs
+        p_log_p = th.where(self.masks, p_log_p, th.tensor(0.0).to(self.device))
+        return -p_log_p.sum(-1)

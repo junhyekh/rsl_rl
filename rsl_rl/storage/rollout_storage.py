@@ -48,15 +48,19 @@ class RolloutStorage:
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
+            self.action_logit = None
 
         def clear(self):
             self.__init__()
 
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape,
+                 is_discrete,
+                 device="cpu"):
         self.device = device
 
         self.obs_shape = obs_shape
         self.privileged_obs_shape = privileged_obs_shape
+        self._is_discrete = is_discrete
         self.actions_shape = actions_shape
 
         # Core
@@ -85,7 +89,12 @@ class RolloutStorage:
         else:
             self.privileged_observations = None
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        if is_discrete:
+            self.actions = torch.zeros(num_transitions_per_env, num_envs, 
+                                       len(actions_shape), device=self.device)
+        else:
+            self.actions = torch.zeros(num_transitions_per_env, num_envs, 
+                                       actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
         # For PPO
@@ -93,9 +102,16 @@ class RolloutStorage:
         self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-
+        if is_discrete:
+            if len(actions_shape) ==1:
+                self.logit = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+            else:
+                max_len = max(list(actions_shape))
+                actions_shape = (len(actions_shape), max_len)
+                self.logit = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        else:
+            self.mu = torch.zeros(num_transitions_per_env, num_envs, actions_shape, device=self.device)
+            self.sigma = torch.zeros(num_transitions_per_env, num_envs, actions_shape, device=self.device)
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
 
@@ -117,8 +133,11 @@ class RolloutStorage:
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         self.values[self.step].copy_(transition.values)
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
-        self.mu[self.step].copy_(transition.action_mean)
-        self.sigma[self.step].copy_(transition.action_sigma)
+        if self._is_discrete:
+            self.logit[self.step].copy_(transition.action_logit)
+        else:
+            self.mu[self.step].copy_(transition.action_mean)
+            self.sigma[self.step].copy_(transition.action_sigma)
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -187,8 +206,11 @@ class RolloutStorage:
         returns = self.returns.flatten(0, 1)
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
-        old_mu = self.mu.flatten(0, 1)
-        old_sigma = self.sigma.flatten(0, 1)
+        if self._is_discrete:
+            old_logit = self.logit.flatten(0, 1)
+        else:
+            old_mu = self.mu.flatten(0, 1)
+            old_sigma = self.sigma.flatten(0, 1)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -205,12 +227,13 @@ class RolloutStorage:
                 returns_batch = returns[batch_idx]
                 old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
                 advantages_batch = advantages[batch_idx]
-                old_mu_batch = old_mu[batch_idx]
-                old_sigma_batch = old_sigma[batch_idx]
+                old_mu_batch = old_mu[batch_idx] if not self._is_discrete else None
+                old_sigma_batch = old_sigma[batch_idx] if not self._is_discrete else None
+                old_logit_batch = (old_logit[batch_idx] if self._is_discrete else None)
                 yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,
                     None,
-                ), None
+                ), None, old_logit_batch
 
     # for RNNs only
     def reccurent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -239,8 +262,9 @@ class RolloutStorage:
                 critic_obs_batch = padded_critic_obs_trajectories[:, first_traj:last_traj]
 
                 actions_batch = self.actions[:, start:stop]
-                old_mu_batch = self.mu[:, start:stop]
-                old_sigma_batch = self.sigma[:, start:stop]
+                old_mu_batch = self.mu[:, start:stop] if not self._is_discrete else None
+                old_sigma_batch = self.sigma[:, start:stop] if not self._is_discrete else None
+                old_logit_batch = (self.logit[:, start:stop] if self._is_discrete else None)
                 returns_batch = self.returns[:, start:stop]
                 advantages_batch = self.advantages[:, start:stop]
                 values_batch = self.values[:, start:stop]
@@ -269,6 +293,6 @@ class RolloutStorage:
                 yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     hid_a_batch,
                     hid_c_batch,
-                ), masks_batch
+                ), masks_batch, old_logit_batch
 
                 first_traj = last_traj

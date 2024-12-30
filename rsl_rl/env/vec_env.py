@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import torch
 from abc import ABC, abstractmethod
+from typing import Dict
 
 
 class VecEnv(ABC):
@@ -26,7 +27,7 @@ class VecEnv(ABC):
     """Number of observations."""
     num_privileged_obs: int
     """Number of privileged observations."""
-    num_actions: int
+    num_actions: int|list[int]
     """Number of actions."""
     max_episode_length: int
     """Maximum episode length."""
@@ -52,6 +53,69 @@ class VecEnv(ABC):
     """
     Operations.
     """
+
+    @abstractmethod
+    def get_observations(self) -> tuple[torch.Tensor, dict]:
+        """Return the current observations.
+
+        Returns:
+            Tuple[torch.Tensor, dict]: Tuple containing the observations and extras.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def reset(self) -> tuple[torch.Tensor, dict]:
+        """Reset all environment instances.
+
+        Returns:
+            Tuple[torch.Tensor, dict]: Tuple containing the observations and extras.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        """Apply input action on the environment.
+
+        Args:
+            actions (torch.Tensor): Input actions to apply. Shape: (num_envs, num_actions)
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+                A tuple containing the observations, rewards, dones and extra information (metrics).
+        """
+        raise NotImplementedError
+
+class MAVecEnv(ABC):
+    """
+    Abstract class for vectorized environment with multi-agent setup
+    """
+    num_envs: int
+    """Number of environments."""
+    num_obs: Dict[str, int]
+    """Number of observations."""
+    num_privileged_obs: Dict[str, int]
+    """Number of privileged observations."""
+    num_actions: Dict[str, int]
+    """Number of actions."""
+    max_episode_length: int
+    """Maximum episode length."""
+    privileged_obs_buf: torch.Tensor
+    """Buffer for privileged observations."""
+    obs_buf: torch.Tensor
+    """Buffer for observations."""
+    rew_buf: torch.Tensor
+    """Buffer for rewards."""
+    reset_buf: torch.Tensor
+    """Buffer for resets."""
+    episode_length_buf: torch.Tensor  # current episode duration
+    """Buffer for current episode lengths."""
+    extras: dict
+    """Extra information (metrics).
+
+    Extra information is stored in a dictionary. This includes metrics such as the episode reward, episode length,
+    etc. Additional information can be stored in the dictionary such as observations for the critic network, etc.
+    """
+    device: torch.device
 
     @abstractmethod
     def get_observations(self) -> tuple[torch.Tensor, dict]:

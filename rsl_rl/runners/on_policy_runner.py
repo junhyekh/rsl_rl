@@ -36,6 +36,7 @@ class OnPolicyRunner:
             num_critic_obs = extras["observations"]["critic"].shape[1]
         else:
             num_critic_obs = num_obs
+        print(self.env.num_actions)
         actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
         actor_critic: ActorCritic | ActorCriticRecurrent | ActorCriticRange = actor_critic_class(
             num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
@@ -56,12 +57,15 @@ class OnPolicyRunner:
             self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
             self.critic_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
         # init storage and model
+        is_discrete = (not actor_critic.is_continuous)
+
         self.alg.init_storage(
             self.env.num_envs,
             self.num_steps_per_env,
             num_obs,
             num_critic_obs,
-            [self.env.num_actions],
+            self.env.num_actions,
+            is_discrete
         )
 
         # Log
