@@ -162,14 +162,14 @@ class ActorCritic(nn.Module):
     def act_inference(self, observations):
         if self._is_discrete:
             logits = self.actor(observations)
-            return logits.amax(-1)
+            return logits.argmax(-1)
         elif self._is_multi_discrete:
             logits = self.actor(observations).view(-1, *self._action_shape)
             if self._require_mask:
                 logits = torch.where(self._mask,
                                     logits,
                                     torch.tensor(-1e+8).to(observations.device))
-            return logits.amax(-1)
+            return logits.argmax(-1)
         else:
             actions_mean = self.actor(observations)
             return actions_mean
