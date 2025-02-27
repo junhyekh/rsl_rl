@@ -61,7 +61,9 @@ class OnPolicyRunner:
 
         self.alg.init_storage(
             self.env.num_envs,
-            self.num_steps_per_env,
+            # FIXME currently arbitrary value 
+            # is it too large? 
+            self.num_steps_per_env*32,
             num_obs,
             num_critic_obs,
             self.env.num_actions,
@@ -120,7 +122,10 @@ class OnPolicyRunner:
             start = time.time()
             # Rollout
             with torch.inference_mode():
-                for i in range(self.num_steps_per_env):
+                # for i in range(self.num_steps_per_env):
+                while True:
+                    if (self.alg.storage.step>self.num_steps_per_env).all():
+                        break
                     actions = self.alg.act(obs, critic_obs)
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # move to the right device
@@ -213,6 +218,7 @@ class OnPolicyRunner:
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
         self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
+        self.writer.add_scalar("Loss/kl", self.alg._prev_kl, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])

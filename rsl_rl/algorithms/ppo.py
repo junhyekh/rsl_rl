@@ -55,6 +55,7 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self._prev_kl = None
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, is_discrete):
         self.storage = RolloutStorage(
@@ -92,14 +93,24 @@ class PPO:
             self.transition.rewards += self.gamma * torch.squeeze(
                 self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
             )
-
+        if "action_mask" in infos:
+            self.transition.update_indices = infos["action_mask"]
         # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
 
     def compute_returns(self, last_critic_obs):
+        # last_critic_obs in here is not an actual last_critic_obs that we need
+        # if the episode i is in the middle
+        # value stored in the buffer should be the last value (not flushed yet)
+        # if the episode i has been flushed (nothing in local buffer)
+        # this critic obs is the true critic obs
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
+        if True:
+            # TODO this is not working when critic_obs != obs
+            on_going = self.storage._local_transition.activated
+            last_values[on_going] = self.storage._local_transition.values[on_going]
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self):
@@ -155,6 +166,8 @@ class PPO:
                         )
 
                     kl_mean = torch.mean(kl)
+                    # print(kl, kl_mean)
+                    self._prev_kl = kl_mean
 
                     if kl_mean > self.desired_kl * 2.0:
                         self.learning_rate = max(1e-5, self.learning_rate / 1.5)

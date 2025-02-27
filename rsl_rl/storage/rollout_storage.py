@@ -6,15 +6,31 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
+import copy
 
 from rsl_rl.utils import split_and_pad_trajectories
 
-def _copy(s, t, i):
+from icecream import ic
+
+def _copy(t, s, i):
     if isinstance(t, dict):
-        for k,v in t.items():
-            s[k][i].copy_(v)
+        for k,v in s.items():
+            if isinstance(i, int):
+                t[k][i].copy_(v)
+            elif isinstance(i, torch.Tensor):
+                t[k].index_copy_(0, i, v)
     else:
-        s[i].copy_(t)
+        if isinstance(i, int):
+            t[i].copy_(s)
+        elif isinstance(i, torch.Tensor):
+            t.index_copy_(0, i, s)
+
+def _copy2(t, s, ti, ei):
+    if isinstance(t, dict):
+        for k,v in s.items():
+            t[k].index_put_((ti, ei), s[ei])
+    else:
+        t.index_put_((ti, ei), s[ei])
 
 def _flatten(s):
     if isinstance(s, dict):
@@ -49,9 +65,116 @@ class RolloutStorage:
             self.action_sigma = None
             self.hidden_states = None
             self.action_logit = None
+            self.update_indices = None
 
         def clear(self):
             self.__init__()
+
+    class Local_Transition:
+        def __init__(self, num_envs: int,
+                     obs_shape: int|dict[str,int],
+                     actions_shape: int,
+                     logit_dim: Sequence[int]|None = None,
+                     device: str|torch.device = 'cuda:0'
+                     ):
+            if isinstance(obs_shape, dict):
+                self.observations = {k: torch.zeros(
+                                                num_envs,
+                                                *v,
+                                                device=device)
+                                                for k,v in obs_shape.items()}
+            else:
+                self.observations = torch.zeros(num_envs, *obs_shape, device=device)
+            # FIXME no state input for critic for now
+            self.critic_observations = None
+            self.rewards = torch.zeros(num_envs, device=device)
+            # self.dones = torch.zeros(num_envs, 1, device=device).byte()
+            self.values = torch.zeros(num_envs, 1, device=device)
+            self.actions_log_prob = torch.zeros(num_envs, device=device)
+            if logit_dim is None:
+                self._is_discrete = False
+                self.action_mean = torch.zeros(num_envs, 
+                                       actions_shape, device=device)
+                self.action_sigma = torch.zeros(num_envs, 
+                                       actions_shape, device=device)
+            else:
+                self._is_discrete = True
+                logit_max = max(list(logit_dim))
+                self.action_logit = torch.zeros(num_envs, actions_shape,
+                                               logit_max, device=device)
+            dtype = torch.long if self._is_discrete else torch.float
+            self.actions = torch.zeros(num_envs, 
+                                       actions_shape,
+                                       dtype=dtype, 
+                                       device=device)
+
+            # FIXME no support for RNN
+            self.hidden_states = None
+            # buffer is initialized (start recording)
+            # when the first action_mask is set
+            self.activated = torch.zeros(num_envs, dtype=torch.bool, device=device)
+
+        def add(self, transition: RolloutStorage.Transition):
+            activated = torch.nonzero(transition.update_indices).ravel()
+            done = (transition.dones>0)
+
+            to_be_flushed = transition.update_indices | done
+            to_be_flushed &= self.activated
+            # accumulate reward for termination
+            termination_update = (done & self.activated)
+            if termination_update.any():
+                self.rewards[termination_update] += transition.rewards[termination_update]
+            
+            # for attr_name, attr_value in transition.__dict__.items():
+            #     if isinstance(attr_value, torch.Tensor):
+            #         print(f"Attribute '{attr_name}' is a tensor with shape {attr_value.shape}")
+
+            if to_be_flushed.any():
+                # get copy of transition if we have to return
+                transition_buff = copy.deepcopy(transition)
+                transition_buff.rewards[to_be_flushed] = self.rewards[to_be_flushed]
+                transition_buff.actions[to_be_flushed] = self.actions[to_be_flushed]
+                transition_buff.values[to_be_flushed] = self.values[to_be_flushed]
+                transition_buff.actions_log_prob[to_be_flushed] = self.actions_log_prob[to_be_flushed]
+                # once flushed reward have to be 0
+                self.rewards[to_be_flushed] = 0.0
+                
+                # _copy(transition_buff.observations, self.observations[to_be_flushed],
+                #       to_be_flushed)
+                transition_buff.observations[to_be_flushed] = self.observations[to_be_flushed]
+                if self._is_discrete:
+                    transition_buff.action_logit[to_be_flushed] = self.action_logit[to_be_flushed]
+                else:
+                    transition_buff.action_mean[to_be_flushed] = self.action_mean[to_be_flushed]
+                    transition_buff.action_sigma[to_be_flushed] = self.action_sigma[to_be_flushed]
+            else:
+                transition_buff = transition
+
+            self.activated[activated] = 1
+            # terminated environment is not activate until next action come
+            self.activated[done] = 0
+
+            # initialize the buf with current transition
+            if self.activated.any():
+                self.rewards[self.activated] += transition.rewards[self.activated]
+                # _copy(self.observations, transition.observations[activated], activated)
+                self.observations[self.activated] = transition.observations[self.activated]
+                self.values[self.activated] = transition.values[self.activated]
+                self.actions[self.activated] = transition.actions[self.activated]
+                self.actions_log_prob[self.activated] = transition.actions_log_prob[self.activated]
+                if self._is_discrete:
+                    self.action_logit[self.activated] = transition_buff.action_logit[self.activated]
+                else:
+                    self.action_mean[self.activated] = transition_buff.action_mean[self.activated]
+                    self.action_sigma[self.activated] = transition_buff.action_sigma[self.activated]
+
+            transition_buff.update_indices = to_be_flushed
+            return transition_buff
+            
+
+        def clear(self):
+            self.activated[:] = 0
+            self.rewards[:] = 0
 
     def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape,
                  is_discrete,
@@ -62,6 +185,15 @@ class RolloutStorage:
         self.privileged_obs_shape = privileged_obs_shape
         self._is_discrete = is_discrete
         self.actions_shape = actions_shape
+
+        self._is_debug = False
+        ic(actions_shape)
+        self._local_transition = self.Local_Transition(num_envs,
+                                                       self.obs_shape,
+                                                       len(actions_shape) if is_discrete else actions_shape,
+                                                       actions_shape if is_discrete else None,
+                                                       self.device
+                                                       )
 
         # Core
         if isinstance(obs_shape, dict):
@@ -119,11 +251,59 @@ class RolloutStorage:
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
 
-        self.step = 0
+        self.step = torch.zeros(num_envs, dtype=torch.long,
+                                device=self.device)
+        
 
-    def add_transitions(self, transition: Transition):
-        if self.step >= self.num_transitions_per_env:
-            raise AssertionError("Rollout buffer overflow")
+    def add_transitions_v2(self, transition: Transition):
+
+        if transition.update_indices is None:
+            s = self.step
+            ei = torch.arange(self.num_envs, device=self.device)
+        else:
+            #First add to the local buffer
+            transition = self._local_transition.add(transition)
+            # everything is updated based on the output of the local buffer
+            s = self.step[transition.update_indices]
+            ei = transition.update_indices
+        _copy2(self.observations, transition.observations, s, ei)
+        if self.privileged_observations is not None:
+            _copy2(self.privileged_observations,
+                  transition.critic_observations, s, ei)
+        _copy2(self.actions, transition.actions.float(), s, ei)
+        _copy2(self.rewards, transition.rewards.view(-1, 1), s, ei)
+        _copy2(self.dones, transition.dones.view(-1, 1).byte(), s, ei)
+        _copy2(self.values, transition.values, s, ei)
+        _copy2(self.actions_log_prob, transition.actions_log_prob.view(-1, 1), s, ei)
+        if self._is_discrete:
+            _copy2(self.logit, transition.action_logit, s, ei)
+        else:
+            _copy2(self.mu, transition.action_mean, s, ei)
+            _copy2(self.sigma, transition.action_sigma, s, ei)
+        
+        if self._is_debug:
+            ic(s, ei, self.step)
+            # ic(self.observations[s, ei], transition.observations,
+            #    transition.observations[ei])
+            if False:
+                ic(self.actions[s, ei], transition.actions,
+                transition.actions[ei])
+                ic(self.rewards[s, ei], transition.rewards,
+                transition.rewards[ei])
+                ic(self.dones[s, ei], transition.dones,
+                transition.dones[ei])
+                ic(self.values[s, ei], transition.values,
+                transition.values[ei])
+
+        self._save_hidden_states(transition.hidden_states)
+        if transition.update_indices is None:
+            self.step += 1
+        else:
+            # ic(transition.update_indices, self.step)
+            self.step[transition.update_indices] += 1
+            # ic(self.step)
+
+    def add_transitions_v1(self, transition: Transition):
         _copy(self.observations, transition.observations, self.step)
         if self.privileged_observations is not None:
             _copy(self.privileged_observations,
@@ -140,6 +320,11 @@ class RolloutStorage:
             self.sigma[self.step].copy_(transition.action_sigma)
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
+
+    def add_transitions(self, transition: Transition):
+        if (self.step >= self.num_transitions_per_env).any():
+            raise AssertionError("Rollout buffer overflow")
+        self.add_transitions_v2(transition)
 
     def _save_hidden_states(self, hidden_states):
         if hidden_states is None or hidden_states == (None, None):
@@ -162,24 +347,88 @@ class RolloutStorage:
             self.saved_hidden_states_c[i][self.step].copy_(hid_c[i])
 
     def clear(self):
-        self.step = 0
+        self.step[:] = 0
+        self.values[:] = 0
+        self.returns[:] = 0
+        self.rewards[:] = 0
+        self.dones[:] = 0
+        self._local_transition.clear()
 
     def compute_returns(self, last_values, gamma, lam):
-        advantage = 0
-        for step in reversed(range(self.num_transitions_per_env)):
-            if step == self.num_transitions_per_env - 1:
-                next_values = last_values
+        advantage = torch.zeros(self.num_envs, 1, device=self.device)
+        end_ = self.step.amax().item()
+        ic(self.step, end_)
+        ic(self.values[end_], self.values[self.step.amin().item()-1])
+        for step in reversed(range(self.step.amin().item()-1)):
+            if False:
+                use_next_val = self.step> step+1
+                use_last_val = self.step == step +1
+                valid = torch.logical_or(use_last_val,
+                                        use_next_val)
+                next_values = self.values[step].clone()
+                # ic(step, valid)
+                if len(use_next_val)>0:
+                    next_values[use_next_val] = self.values[step + 1, use_next_val]
+                    # ic(step, use_next_val)
+                if len(use_last_val)>0:
+                    # ic(step, use_last_val)
+                    next_values[use_last_val] = last_values[use_last_val]
+                next_is_not_terminal = 1.0 - self.dones[step, valid].float()
+                delta = self.rewards[step, valid] + next_is_not_terminal * gamma * next_values[valid] - self.values[step, valid]
+                advantage[valid] = delta + next_is_not_terminal * gamma * lam * advantage[valid]
+                # ic(step, advantage[valid].shape)
+                self.returns[step, valid] = advantage[valid] + self.values[step, valid]
             else:
                 next_values = self.values[step + 1]
-            next_is_not_terminal = 1.0 - self.dones[step].float()
-            delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
-            advantage = delta + next_is_not_terminal * gamma * lam * advantage
-            self.returns[step] = advantage + self.values[step]
-
-        # Compute and normalize the advantages
+                next_is_not_terminal = 1.0 - self.dones[step].float()
+                delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
+                advantage = delta + next_is_not_terminal * gamma * lam * advantage
+                self.returns[step] = advantage + self.values[step]
         self.advantages = self.returns - self.values
-        self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
+        mask = torch.arange(self.num_transitions_per_env, device=self.device)[..., None]
+        if False:
+            mask = (mask<self.step).float()[..., None]
+        else:
+            l = torch.full_like(self.step, self.step.amin().item()-1)
+            mask = (mask<l).float()[..., None]
+        # for iii, sss in enumerate(self.step):
+        #     ic(sss,self.values[:end_+1, iii].ravel(),
+        #        self.returns[:end_+1, iii].ravel(),
+        #        self.rewards[:end_+1, iii].ravel(),
+        #        self.dones[:end_+1, iii].ravel(),
+        #        mask[:, iii].ravel()
+        #        )
+        sum = (self.advantages * mask).sum()
+        count = mask.sum()
+        mean = sum / count
+        var = ((self.advantages - mean) ** 2 * mask).sum() /(count-1)
+        std = var.sqrt()
+        if self._is_debug:
+            before_norm = self.advantages.clone()
+        self.advantages = (self.advantages - mean) / (std + 1e-8)
 
+        if self._is_debug:
+            adv_dbg = 0
+            return_dbg = self.returns.clone()
+            for step in reversed(range(end_)):
+                if step == self.num_transitions_per_env - 1:
+                    next_values = last_values
+                else:
+                    next_values = self.values[step + 1]
+                next_is_not_terminal = 1.0 - self.dones[step].float()
+                delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
+                adv_dbg = delta + next_is_not_terminal * gamma * lam * adv_dbg
+                return_dbg[step] = adv_dbg + self.values[step]
+
+            # Compute and normalize the advantages
+            adv_dbg_t = return_dbg - self.values
+            ic(before_norm[:end_], adv_dbg_t[:end_])
+            ic(count, sum, mean, std)
+            ic(adv_dbg_t[:end_].sum(), adv_dbg_t[:end_].mean(), adv_dbg_t[:end_].std())
+            adv_dbg_t = (adv_dbg_t - adv_dbg_t[:end_].mean()) / (adv_dbg_t[:end_].std() + 1e-8)
+            ic(self.returns[:end_], return_dbg[:end_])
+            ic(self.advantages[:end_], adv_dbg_t[:end_])
+            
     def get_statistics(self):
         done = self.dones
         done[-1] = 1
@@ -191,7 +440,9 @@ class RolloutStorage:
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):
-        batch_size = self.num_envs * self.num_transitions_per_env
+        end_ = self.step.amin().item()-1
+        ic(self.step.amin().item(), end_)
+        batch_size = self.num_envs * end_
         mini_batch_size = batch_size // num_mini_batches
         indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
 

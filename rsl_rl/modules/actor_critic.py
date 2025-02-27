@@ -54,6 +54,7 @@ class ActorCritic(nn.Module):
                 self._mask = nn.Parameter(mask[None],
                                         requires_grad=False
                                         )
+                print(self._mask)
             num_actions = max_len * n_actions
             self._action_shape = (n_actions, max_len)
 
