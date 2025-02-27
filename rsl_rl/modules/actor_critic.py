@@ -52,6 +52,17 @@ class ActorCritic(nn.Module):
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
+        for name, module in self.actor.named_modules():
+            if hasattr(module, 'weight'):
+                weight_norm = module.weight.data.norm()
+                if weight_norm>0.6:
+                    with torch.no_grad():
+                        module.weight.data = 0.6 / weight_norm * module.weight.data
+            
+            if hasattr(module, 'bias') and module.bias is not None:
+                with torch.no_grad():
+                    nn.init.zeros_(module.bias)
+
         # Value function
         critic_layers = []
         critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
