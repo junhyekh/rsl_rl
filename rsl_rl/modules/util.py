@@ -7,7 +7,7 @@ import numpy as np
 from flash_attn.modules.mha import MHA
 import einops
 
-from torch.distributions import Categorical, Independent 
+from torch.distributions import Categorical, Independent, Distribution
 
 def get_activation(act_name):
     if act_name == "elu":
@@ -148,6 +148,11 @@ class MHAWrapper(MHA):
         o = super().forward(q, m)
         o = o.reshape(*s[:-2], *o.shape[-2:])
         return o
+    
+# class MultiCategorical(Distribution):
+#     def __init__(self, probs=None, logits=None, validate_args=None):
+#         super().__init__(validate_args=validate_args)
+
 
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=None):
