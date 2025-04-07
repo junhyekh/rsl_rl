@@ -139,9 +139,11 @@ class PPO:
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.inference_mode():
                     if not self.actor_critic.is_continuous:
-                        if False:
+                        if True:
                             old_probs = F.softmax(old_logit_batch, dim=-1)
-                            t = old_probs * (old_logit_batch- logit_batch)
+                            t = old_probs * (old_logit_batch - logit_batch)
+                            t[(old_probs == 0).expand_as(t)] = torch.inf
+                            t[(old_probs == 0).expand_as(t)] = 0
                             # is necessary? since for the masking part
                             # old_logit_batch = logit_batch << 0
                             # t[(probs_batch == 0).expand_as(t)] = torch.inf
@@ -149,6 +151,7 @@ class PPO:
                         else:
                             # from RLgames
                             kl = 0.5 * ((old_logit_batch - logit_batch) ** 2).mean()
+
                     else:
                         kl = torch.sum(
                             torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
