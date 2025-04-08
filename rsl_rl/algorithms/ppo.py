@@ -141,9 +141,10 @@ class PPO:
                     if not self.actor_critic.is_continuous:
                         if True:
                             old_probs = F.softmax(old_logit_batch, dim=-1)
+                            new_probs = F.softmax(logit_batch, dim=-1)
                             t = old_probs * (old_logit_batch - logit_batch)
                             t[(old_probs == 0).expand_as(t)] = torch.inf
-                            t[(old_probs == 0).expand_as(t)] = 0
+                            t[(new_probs == 0).expand_as(t)] = 0
                             # is necessary? since for the masking part
                             # old_logit_batch = logit_batch << 0
                             # t[(probs_batch == 0).expand_as(t)] = torch.inf

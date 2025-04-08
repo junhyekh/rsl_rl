@@ -29,6 +29,8 @@ class ActorCriticRecurrent(ActorCritic):
         init_noise_std=1.0,
         base_hidden_dims: Optional[List[int]] = None,
         use_layernorm: bool = False,
+        is_discrete=False,
+        is_multi_discrete=False,
         **kwargs,
     ):
         if kwargs:
@@ -43,6 +45,9 @@ class ActorCriticRecurrent(ActorCritic):
             critic_hidden_dims=critic_hidden_dims,
             activation=activation,
             init_noise_std=init_noise_std,
+            use_layernorm=use_layernorm,
+            is_discrete=is_discrete,
+            is_multi_discrete=is_multi_discrete,
         )
 
         if base_hidden_dims is not None:
