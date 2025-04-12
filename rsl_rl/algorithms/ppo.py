@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,6 +12,7 @@ import torch.nn.functional as F
 
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
+from rsl_rl.modules.util import explained_variance
 
 
 class PPO:
@@ -105,6 +108,7 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        log_s = defaultdict(list)
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
@@ -202,9 +206,19 @@ class PPO:
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
 
+            #add logging
+            log_s['log/avg_val'].append(value_batch.mean().detach())
+            log_s['log/std_val'].append(value_batch.std().detach())
+            log_s['log/avg_ret'].append(returns_batch.mean().detach())
+            log_s['log/std_ret'].append(returns_batch.std().detach())
+            log_s['log/std_obs'].append(obs_batch.reshape(-1, 
+                                                          obs_batch.shape[-1]).std(dim=0).mean().detach())
+            log_s['log/kl'].append(kl_mean.detach())
+            log_s['log/explained_variance'].append(explained_variance(value_batch, returns_batch).detach())
+        
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss
+        return mean_value_loss, mean_surrogate_loss, log_s

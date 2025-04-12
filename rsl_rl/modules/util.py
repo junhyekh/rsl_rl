@@ -177,3 +177,7 @@ class CategoricalMasked(Categorical):
         p_log_p = self.logits * self.probs
         p_log_p = th.where(self.masks, p_log_p, th.tensor(0.0).to(self.device))
         return -p_log_p.sum(-1)
+    
+def explained_variance(y_pred: th.Tensor, y_true: th.Tensor) -> th.Tensor:
+    v_pred = th.var(y_true)
+    return 1.0 - th.var(y_true - y_pred) / v_pred
