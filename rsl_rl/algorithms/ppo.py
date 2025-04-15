@@ -147,15 +147,17 @@ class PPO:
                             old_probs = F.softmax(old_logit_batch, dim=-1)
                             new_probs = F.softmax(logit_batch, dim=-1)
                             t = old_probs * (old_logit_batch - logit_batch)
-                            t[(old_probs == 0).expand_as(t)] = torch.inf
-                            t[(new_probs == 0).expand_as(t)] = 0
+                            masks = self.actor_critic._mask
+                            t = t* masks
+                            # t[(old_probs == 0).expand_as(t)] = torch.inf
+                            # t[(new_probs == 0).expand_as(t)] = 0
                             # is necessary? since for the masking part
                             # old_logit_batch = logit_batch << 0
                             # t[(probs_batch == 0).expand_as(t)] = torch.inf
                             kl = t.sum(-1)
                         else:
                             # from RLgames
-                            kl = 0.5 * ((old_logit_batch - logit_batch) ** 2).mean()
+                            kl = 0.5 * ((old_logit_batch - logit_batch) ** 2).sum(-1)
 
                     else:
                         kl = torch.sum(
