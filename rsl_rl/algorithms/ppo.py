@@ -154,7 +154,14 @@ class PPO:
                             # is necessary? since for the masking part
                             # old_logit_batch = logit_batch << 0
                             # t[(probs_batch == 0).expand_as(t)] = torch.inf
-                            kl = t.sum(-1)
+                            
+                            # which one is better?
+                            # sum over the action dimension
+                            if True:
+                                kl = t.sum((-2,-1)) 
+                            # mean over the action dimension
+                            else:
+                                kl = t.sum(-1).mean(-1) 
                         else:
                             # from RLgames
                             kl = 0.5 * ((old_logit_batch - logit_batch) ** 2).sum(-1)
