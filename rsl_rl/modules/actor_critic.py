@@ -7,7 +7,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from torch.distributions import Normal, Categorical, Independent
-from rsl_rl.modules.util import CategoricalMasked, get_activation
+from rsl_rl.network.util import CategoricalMasked, get_activation
 
 
 class ActorCritic(nn.Module):

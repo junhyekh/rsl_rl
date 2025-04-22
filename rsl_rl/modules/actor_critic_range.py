@@ -10,9 +10,10 @@ import torch.nn as nn
 from torch.distributions import Normal
 from functorch import (make_functional_with_buffers, vmap)
 
-from rsl_rl.modules.actor_critic import get_activation
-from rsl_rl.modules.util import merge_shapes, MLP, SplitDim, MHAWrapper
-from rsl_rl.modules.network import ActorSubnet, CriticSubnet, GateModMLP
+from rsl_rl.network.util import get_activation, merge_shapes, MLP, SplitDim, MHAWrapper
+
+
+from rsl_rl.network.gate_mod_mlp import ActorSubnet, CriticSubnet, GateModMLP
 
 
 

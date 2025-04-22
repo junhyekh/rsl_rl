@@ -25,7 +25,7 @@ def get_activation(act_name):
     elif act_name == "sigmoid":
         return nn.Sigmoid()
     else:
-        print("invalid activation function!")
+        print(f"invalid activation function with {act_name}!")
         return None
 
 def merge_shapes(*dims) -> Tuple[int, ...]:

@@ -9,8 +9,7 @@ from typing import Optional, List, Tuple, Dict
 import torch as th
 import torch.nn as nn
 
-from rsl_rl.modules.actor_critic import get_activation
-from rsl_rl.modules.util import merge_shapes, MLP
+from rsl_rl.network.util import get_activation, merge_shapes, MLP
 from opt_einsum import contract_expression
 
 

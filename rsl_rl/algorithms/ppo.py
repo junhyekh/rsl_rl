@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
-from rsl_rl.modules.util import explained_variance
+from rsl_rl.network.util import explained_variance
 
 
 class PPO:
@@ -220,8 +220,14 @@ class PPO:
             log_s['log/std_val'].append(value_batch.std().detach())
             log_s['log/avg_ret'].append(returns_batch.mean().detach())
             log_s['log/std_ret'].append(returns_batch.std().detach())
-            log_s['log/std_obs'].append(obs_batch.reshape(-1, 
-                                                          obs_batch.shape[-1]).std(dim=0).mean().detach())
+            # if isinstance(obs_batch, dict):
+            #     for k, v in obs_batch.items():
+
+            #         log_s[f'log/std_{k}'].append(v.reshape(-1, 
+            #                                               v.shape[-1]).std(dim=0).mean().detach())
+            # else:
+            #     log_s['log/std_obs'].append(obs_batch.reshape(-1, 
+            #                                                   obs_batch.shape[-1]).std(dim=0).mean().detach())
             log_s['log/kl'].append(kl_mean.detach())
             log_s['log/explained_variance'].append(explained_variance(value_batch, returns_batch).detach())
         
