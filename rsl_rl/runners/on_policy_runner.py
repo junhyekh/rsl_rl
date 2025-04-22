@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 import rsl_rl
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization, ActorCriticRange
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, EmpiricalNormalization, ActorCriticRange, ActorCriticV2, ActorCriticNetConfig
 from rsl_rl.utils import store_code_state, _map
 
 
@@ -21,9 +21,6 @@ class OnPolicyRunner:
     """On-policy runner for training and evaluation."""
 
     def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
-        self.cfg = train_cfg
-        self.alg_cfg = train_cfg["algorithm"]
-        self.policy_cfg = train_cfg["policy"]
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()
@@ -36,16 +33,23 @@ class OnPolicyRunner:
             num_critic_obs = extras["observations"]["critic"].shape[1]
         else:
             num_critic_obs = num_obs
-        print(self.env.num_actions)
-        actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
-        actor_critic: ActorCritic | ActorCriticRecurrent | ActorCriticRange = actor_critic_class(
-            num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
+        if not isinstance(train_cfg, dict):
+            self.cfg = train_cfg.to_dict()
+            self.alg_cfg = self.cfg["algorithm"]
+            self.policy_cfg = train_cfg.policy
+            actor_critic = self.init_v2(num_obs, num_critic_obs)
+        else:
+            self.cfg = train_cfg
+            self.alg_cfg = train_cfg["algorithm"]
+            self.policy_cfg = train_cfg["policy"]
+            actor_critic = self.init_v1(num_obs, num_critic_obs)
+        
         alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.empirical_normalization = self.cfg["empirical_normalization"]
+
         if isinstance(num_obs, int):
             num_obs = [num_obs]
         if isinstance(num_critic_obs, int):
@@ -76,6 +80,21 @@ class OnPolicyRunner:
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
 
+    def init_v1(self, num_obs, num_critic_obs) -> ActorCritic | ActorCriticRecurrent | ActorCriticRange:
+        actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
+        actor_critic: ActorCritic | ActorCriticRecurrent | ActorCriticRange = actor_critic_class(
+            num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
+        ).to(self.device)
+        return actor_critic
+
+    def init_v2(self, num_obs, num_critic_obs) -> ActorCriticV2:    
+        actor_critic_cfg = self.policy_cfg.copy()
+        actor_critic_cfg.num_obs = num_obs
+        actor_critic_cfg.num_critic_obs = num_critic_obs
+        actor_critic_cfg.num_actions = self.env.num_actions
+        actor_critic = ActorCriticV2(actor_critic_cfg)
+        return actor_critic.to(self.device)
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
@@ -92,7 +111,11 @@ class OnPolicyRunner:
                 from rsl_rl.utils.wandb_utils import WandbSummaryWriter
 
                 self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
-                self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
+                if not isinstance(self.policy_cfg, dict):
+                    policy_cfg = self.policy_cfg.to_dict()
+                else:
+                    policy_cfg = self.policy_cfg
+                self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, policy_cfg)
             elif self.logger_type == "tensorboard":
                 self.writer = TensorboardSummaryWriter(log_dir=self.log_dir, flush_secs=10)
             else:
@@ -207,13 +230,15 @@ class OnPolicyRunner:
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std.mean()
+        if self.alg.actor_critic.is_continuous:
+            mean_std = self.alg.actor_critic.std.mean()
+            self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
         self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
-        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
@@ -241,7 +266,6 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
             )
@@ -255,11 +279,11 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-
+        if self.alg.actor_critic.is_continuous:
+            log_string += f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
         log_string += ep_string
         log_string += (
             f"""{'-' * width}\n"""
