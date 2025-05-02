@@ -146,7 +146,7 @@ class ActorCriticV2(nn.Module):
             if isinstance(v.network_cfg.class_type, network_cfg.CNN2DConfig):
                 assert len(obs_dim[k]) >=3, "CNN input dimension must be longer than 3"
                 v.network_cfg.input_channels = obs_dim[k][-3]
-            feature_blocks[k] = v.network_cfg.class_type(v.network_cfg)
+            feature_blocks[k] = v.class_type(v)
             dummy_input = th.randn(v.network_cfg.input_dim)[None]
             dummy_output = feature_blocks[k](dummy_input)
             v.network_cfg.output_dim = list(dummy_output.shape[1:])
@@ -157,7 +157,7 @@ class ActorCriticV2(nn.Module):
             if isinstance(v.network_cfg, network_cfg.CNN1DConfig):
                 assert len(v.network_cfg.input_dim) >= 3, "CNN1D input dimension must be longer than 3 with history"
                 v.network_cfg.input_channels = v.network_cfg.input_dim[1]
-            aggregation_blocks[k] = v.network_cfg.class_type(v.network_cfg)
+            aggregation_blocks[k] = v.class_type(v)
             dummy_output = aggregation_blocks[k](dummy_outputs[k])
             v.network_cfg.output_dim = list(dummy_output.shape)
             dummy_outputs[k] = dummy_output

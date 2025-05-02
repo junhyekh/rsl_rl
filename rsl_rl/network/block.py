@@ -18,8 +18,11 @@ class FeatureExtractor(nn.Module):
         self.network = cfg.network_cfg.class_type(cfg.network_cfg)
 
     def forward(self, x: th.Tensor,
-                ctx: dict[str, th.Tensor]) -> th.Tensor:
-        return self.network(x, ctx)
+                ctx: dict[str, th.Tensor] | None = None) -> th.Tensor:
+        if isinstance(self.network, nn.Identity):
+            return self.network(x)
+        else:
+            return self.network(x, ctx)
 
 
 
@@ -31,23 +34,32 @@ class AggregationBlock(nn.Module):
         self.cfg = cfg
         self.network = cfg.network_cfg.class_type(cfg.network_cfg)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: th.Tensor,
+                ctx: dict[str, th.Tensor] | None = None) -> th.Tensor:
         s = x.shape
-        if len(s) > 3:
+        if len(s) > 2:
             # we have to flatten dimension
             x = x.reshape(s[0], -1)
-        return self.network(x)
+        if isinstance(self.network, nn.Identity):
+            return self.network(x)
+        else:
+            return self.network(x, ctx)
     
 
 class HistoryAggregationBlock(AggregationBlock):
+    cfg: network_cfg.HistoryAggregationBlockConfig
     def __init__(self, cfg: network_cfg.HistoryAggregationBlockConfig):
         super(HistoryAggregationBlock, self).__init__(cfg)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: th.Tensor,
+                ctx: dict[str, th.Tensor] | None = None) -> th.Tensor:
         s = x.shape
         if len(s) > 3:
             x = x.reshape(*s[:2], -1)
-        x = self.network(x)
+        if isinstance(self.network, nn.Identity):
+            x = self.network(x)
+        else:
+            x = self.network(x, ctx)
         if self.cfg.flatten_history:
             x = x.reshape(x.shape[0], -1)
         return x
@@ -59,12 +71,13 @@ class RNNAggregationBlock(HistoryAggregationBlock):
         super(RNNAggregationBlock, self).__init__(cfg)
         
     def forward(self, x: th.Tensor,
-                h: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
+                h: th.Tensor,
+                ctx: dict[str, th.Tensor] | None = None) -> tuple[th.Tensor, th.Tensor]:
         s = x.shape
         if len(s) > 3:
             # we have to flatten dimension -> (B, H, D1, D2) -> (B, H, D1 * D2)
             x = x.reshape(*s[:2], -1)
-        out, h = self.network(x, h)
+        out, h = self.network(x, h, ctx)
         if self.cfg.flatten_history:
             # (B, H, D1) -> (B, H * D1)
             out = out.reshape(out.shape[0], -1)
