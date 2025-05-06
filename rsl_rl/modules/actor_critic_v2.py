@@ -16,13 +16,7 @@ from rsl_rl.network.util import CategoricalMasked
 
 import numpy as np
 
-
-@configclass
-class NetworkConfig:
-    feature_block_cfg: dict[str, network_cfg.FeatureExtractorConfig] = MISSING
-    aggregation_block_cfg: dict[str, network_cfg.AggregationBlockConfig] = MISSING
-    fuser_block_cfg: network_cfg.FuserBlockConfig = MISSING
-    state_aggr_block_cfg: network_cfg.AggregationBlockConfig = MISSING
+from rsl_rl.network import NetworkWrapper
     
 
 @configclass
@@ -30,8 +24,8 @@ class ActorCriticNetConfig:
     num_obs: dict[str, list[int]] = MISSING
     num_critic_obs: dict[str, list[int]]|None = None
     num_actions: int|list[int] = MISSING
-    actor_cfg: NetworkConfig = MISSING
-    critic_cfg: NetworkConfig|None = None
+    actor_cfg: network_cfg.NetworkConfig = MISSING
+    critic_cfg: network_cfg.NetworkConfig|None = None
     is_discrete: bool = False
     is_multi_discrete: bool = False
     init_noise_std: float = 1.0
@@ -88,96 +82,33 @@ class ActorCriticV2(nn.Module):
         else:
             self._action_shape = self.cfg.num_actions
             self._action_output_dim = self.cfg.num_actions
-            ic(self._action_shape, self._action_output_dim)
+            if isinstance(self.cfg.num_actions, int):
+                self.cfg.actor_cfg.state_aggr_block_cfg.network_cfg.output_dim = [self.cfg.num_actions]
+            else:
+                self.cfg.actor_cfg.state_aggr_block_cfg.network_cfg.output_dim = self.cfg.num_actions
             self.std = nn.Parameter(self.cfg.init_noise_std * th.ones(self.cfg.num_actions))
             Normal.set_default_validate_args = False
    
-        (actor_feature_blocks, 
-         actor_aggregation_blocks, 
-         actor_fuser_block, 
-         actor_state_aggr_block) = self.__configure_network(self.cfg.actor_cfg,
+        self.actor = NetworkWrapper(self.cfg.actor_cfg,
                                                             self.cfg.num_obs)
-        (critic_feature_blocks, 
-         critic_aggregation_blocks, 
-         critic_fuser_block, 
-         critic_state_aggr_block) = self.__configure_network(self.cfg.critic_cfg,
-                                                             self.cfg.num_critic_obs)
+        self.critic = NetworkWrapper(self.cfg.critic_cfg,
+                                     self.cfg.num_critic_obs)
         
-        # actor
-        self.actor_feature_blocks = nn.ModuleDict(actor_feature_blocks)
-        self.actor_aggregation_blocks = nn.ModuleDict(actor_aggregation_blocks)
-        self.actor_fuser_block = actor_fuser_block
-        self.actor_state_aggr_block = actor_state_aggr_block
+        if False:
+            # actor
+            self.actor_feature_blocks = nn.ModuleDict(actor_feature_blocks)
+            self.actor_aggregation_blocks = nn.ModuleDict(actor_aggregation_blocks)
+            self.actor_fuser_block = actor_fuser_block
+            self.actor_state_aggr_block = actor_state_aggr_block
 
-        # critic
-        self.critic_feature_blocks = nn.ModuleDict(critic_feature_blocks)
-        self.critic_aggregation_blocks = nn.ModuleDict(critic_aggregation_blocks)
-        self.critic_fuser_block = critic_fuser_block
-        self.critic_state_aggr_block = critic_state_aggr_block
+            # critic
+            self.critic_feature_blocks = nn.ModuleDict(critic_feature_blocks)
+            self.critic_aggregation_blocks = nn.ModuleDict(critic_aggregation_blocks)
+            self.critic_fuser_block = critic_fuser_block
+            self.critic_state_aggr_block = critic_state_aggr_block
 
         # print network structure
         ic(self)
-    
-    def __configure_network(self,
-                            cfg: NetworkConfig,
-                            obs_dim: dict[str, list[int]]) -> tuple[dict[str, nn.Module], dict[str, nn.Module], nn.Module, nn.Module]:
-        """
-        In here, we sequentially update the network cfg and generate the network
-        order:
-         - feature block cfg 
-         - aggregation block cfg
-         - fuser block cfg
-         - state aggregation block cfg
-        1, we update the feature block cfg based on the input dimension and generate the feature block
-        2, we update the aggregation block cfg based on the feature block output dimension
-        3, we update the fuser block cfg based on the aggregation block output dimension
-        4, we update the state aggregation block cfg based on the fuser block output dimension
-
-        If the network_cfg is not noop (identity) we don't have to update the cfg
-        """
-        feature_blocks = {}
-        aggregation_blocks = {}
-        dummy_outputs = {}
-        ic(obs_dim)
-        # update feature block cfg
-        for k, v in cfg.feature_block_cfg.items():
-            v.network_cfg.input_dim = obs_dim[k]
-            ic(k, v.network_cfg.input_dim, obs_dim[k])
-            if isinstance(v.network_cfg.class_type, network_cfg.CNN2DConfig):
-                assert len(obs_dim[k]) >=3, "CNN input dimension must be longer than 3"
-                v.network_cfg.input_channels = obs_dim[k][-3]
-            feature_blocks[k] = v.class_type(v)
-            dummy_input = th.randn(v.network_cfg.input_dim)[None]
-            dummy_output = feature_blocks[k](dummy_input)
-            v.network_cfg.output_dim = list(dummy_output.shape[1:])
-            dummy_outputs[k] = dummy_output
-        # update aggregation block cfg
-        for k, v in cfg.aggregation_block_cfg.items():
-            v.network_cfg.input_dim = cfg.feature_block_cfg[k].network_cfg.output_dim
-            if isinstance(v.network_cfg, network_cfg.CNN1DConfig):
-                assert len(v.network_cfg.input_dim) >= 3, "CNN1D input dimension must be longer than 3 with history"
-                v.network_cfg.input_channels = v.network_cfg.input_dim[1]
-            aggregation_blocks[k] = v.class_type(v)
-            dummy_output = aggregation_blocks[k](dummy_outputs[k])
-            v.network_cfg.output_dim = list(dummy_output.shape)
-            dummy_outputs[k] = dummy_output
-        # update fuser block cfg
-        fuser_block_cfg = cfg.fuser_block_cfg
-        fuser_block_cfg.network_cfg.input_dim = np.array([v.network_cfg.output_dim 
-                                                                        for v in cfg.aggregation_block_cfg.values()]).sum()
-        fuser_block = fuser_block_cfg.class_type(fuser_block_cfg)
-        dummy_output = fuser_block(dummy_outputs)
-        fuser_block_cfg.network_cfg.output_dim = list(dummy_output.shape[1:])
-
-        # update state aggregation block cfg
-        state_aggr_block_cfg = cfg.state_aggr_block_cfg
-        state_aggr_block_cfg.network_cfg.input_dim = fuser_block_cfg.network_cfg.output_dim
-        state_aggr_block = state_aggr_block_cfg.class_type(state_aggr_block_cfg)
-        dummy_output = state_aggr_block(dummy_output)
-        assert len(dummy_output.shape) == 2, "State aggregation block output dimension must be 2"
-        self.cfg.actor_cfg.state_aggr_block_cfg.network_cfg.output_dim = dummy_output.shape[1:]
-        return feature_blocks, aggregation_blocks, fuser_block, state_aggr_block
-
             
     def forward(self):
         pass
@@ -231,17 +162,17 @@ class ActorCriticV2(nn.Module):
         
     def update_distribution(self, observations):
         if self.cfg.is_discrete:
-            logits = self._forward_actor(observations).view(-1, *self._action_shape)
+            logits = self.actor(observations).view(-1, *self._action_shape)
             self.distribution = Categorical(logits=logits)
         elif self.cfg.is_multi_discrete:
-            logits = self._forward_actor(observations).view(-1, *self._action_shape)
+            logits = self.actor(observations).view(-1, *self._action_shape)
             if self._require_mask:
                 self.distribution = CategoricalMasked(logits=logits,
                                                     masks=self._mask)
             else:
                 self.distribution = Categorical(logits=logits)
         else:
-            mean = self._forward_actor(observations)
+            mean = self.actor(observations)
             self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, observations, **kwargs):
@@ -253,21 +184,21 @@ class ActorCriticV2(nn.Module):
     
     def act_inference(self, observations):
         if self.cfg.is_discrete:
-            logits = self._forward_actor(observations).view(-1, *self._action_shape)
+            logits = self.actor(observations).view(-1, *self._action_shape)
             return logits.argmax(-1)
         elif self.cfg.is_multi_discrete:
-            logits = self._forward_actor(observations).view(-1, *self._action_shape)
+            logits = self.actor(observations).view(-1, *self._action_shape)
             if self._require_mask:
                 logits = th.where(self._mask,
                                     logits,
                                     th.tensor(-1e+8).to(self._mask.device))
             return logits.argmax(-1)
         else:
-            actions_mean = self._forward_actor(observations)
+            actions_mean = self.actor(observations)
             return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
-        value = self._forward_critic(critic_observations)
+        value = self.critic(critic_observations)
         return value
     
 

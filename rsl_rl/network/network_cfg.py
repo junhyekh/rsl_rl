@@ -115,3 +115,11 @@ class FlattenConfig(NetworkBaseConfig):
     class_type: type = nn.Flatten
     start_dim: int = 1
     end_dim: int = -1
+
+
+@configclass
+class NetworkConfig:
+    feature_block_cfg: dict[str, FeatureExtractorConfig] = MISSING
+    aggregation_block_cfg: dict[str, AggregationBlockConfig] = MISSING
+    fuser_block_cfg: FuserBlockConfig = MISSING
+    state_aggr_block_cfg: AggregationBlockConfig = MISSING

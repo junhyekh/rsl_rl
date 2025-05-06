@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.network.util import explained_variance
-
+from rsl_rl.modules.rnd import RandomNetworkDistillation, RNDConfig
 
 class PPO:
     actor_critic: ActorCritic
@@ -34,6 +34,7 @@ class PPO:
         schedule="fixed",
         desired_kl=0.01,
         device="cpu",
+        rnd_cfg: RNDConfig | None = None,
     ):
         self.device = device
 
@@ -59,9 +60,35 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, is_discrete):
+        # rnd
+        if rnd_cfg is not None:
+            self.rnd = RandomNetworkDistillation(cfg=rnd_cfg,
+                                                 device=self.device)
+            params = self.rnd.parameters()
+            self.rnd_optimizer = optim.Adam(params, lr=rnd_cfg.learning_rate)
+
+        else:
+            self.rnd = None
+            self.rnd_optimizer = None   
+
+
+    def init_storage(self, 
+                     num_envs, 
+                     num_transitions_per_env, 
+                     actor_obs_shape, 
+                     critic_obs_shape, 
+                     action_shape, 
+                     is_discrete,
+                     rnd_state_shape=None):
         self.storage = RolloutStorage(
-            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, is_discrete, self.device
+            num_envs, 
+            num_transitions_per_env, 
+            actor_obs_shape, 
+            critic_obs_shape,
+            action_shape,
+            is_discrete,
+            rnd_state_shape,
+            self.device,
         )
 
     def test_mode(self):
@@ -90,6 +117,12 @@ class PPO:
     def process_env_step(self, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+
+        if self.rnd is not None:
+            rnd_state = infos["observations"]["rnd_state"]
+            self.transition.rnd_state = rnd_state.clone()
+            self.transition.rewards += self.rnd.get_intrinsic_reward(rnd_state)
+
         # Bootstrapping on time outs
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * torch.squeeze(
@@ -108,6 +141,11 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        if self.rnd is not None:
+            mean_rnd_loss = 0
+        else:
+            mean_rnd_loss = None
+
         log_s = defaultdict(list)
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -126,6 +164,7 @@ class PPO:
             hid_states_batch,
             masks_batch,
             old_logit_batch,
+            rnd_state_batch,
         ) in generator:
             self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
@@ -206,14 +245,25 @@ class PPO:
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
+            if self.rnd is not None:
+                rnd_loss = self.rnd.get_loss(rnd_state_batch)
+
             # Gradient step
             self.optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
+            # RND
+            if self.rnd is not None:
+                self.rnd_optimizer.zero_grad() # type: ignore
+                rnd_loss.backward()
+                self.rnd_optimizer.step()  # type: ignore
+
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
+            if self.rnd is not None:
+                mean_rnd_loss += rnd_loss.item()
 
             #add logging
             log_s['log/avg_val'].append(value_batch.mean().detach())
@@ -234,6 +284,8 @@ class PPO:
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        if self.rnd is not None:
+            mean_rnd_loss /= num_updates # type: ignore
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, log_s
+        return mean_value_loss, mean_surrogate_loss, mean_rnd_loss, log_s

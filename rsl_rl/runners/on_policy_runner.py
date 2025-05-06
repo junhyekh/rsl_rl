@@ -30,7 +30,11 @@ class OnPolicyRunner:
         else:
             num_obs = obs.shape[1]
         if "critic" in extras["observations"]:
-            num_critic_obs = extras["observations"]["critic"].shape[1]
+            if isinstance(extras["observations"]["critic"], dict):
+                num_critic_obs = {k: tuple(v.shape[1:]) 
+                                  for k,v in extras["observations"]["critic"].items()}
+            else:
+                num_critic_obs = extras["observations"]["critic"].shape[1]
         else:
             num_critic_obs = num_obs
         if not isinstance(train_cfg, dict):
@@ -38,25 +42,48 @@ class OnPolicyRunner:
             self.alg_cfg = self.cfg["algorithm"]
             self.policy_cfg = train_cfg.policy
             actor_critic = self.init_v2(num_obs, num_critic_obs)
+            rnd_cfg = train_cfg.algorithm.rnd_cfg
+            self.alg_cfg.pop("rnd_cfg")
         else:
             self.cfg = train_cfg
             self.alg_cfg = train_cfg["algorithm"]
             self.policy_cfg = train_cfg["policy"]
             actor_critic = self.init_v1(num_obs, num_critic_obs)
+            rnd_cfg = train_cfg["algorithm"].pop("rnd_cfg", None)
+
+        if rnd_cfg is not None:
+            assert "rnd_state" in extras["observations"], "rnd_state must be in the observations"
+            if isinstance(extras["observations"]["rnd_state"], dict):
+                num_rnd_state = {k: tuple(v.shape[1:]) 
+                                 for k,v in extras["observations"]["rnd_state"].items()}
+            else:
+                num_rnd_state = extras["observations"]["rnd_state"].shape[1]
+            rnd_cfg.num_states = num_rnd_state
+            rnd_cfg.weight *= env.unwrapped.step_dt
+        else:
+            num_rnd_state = None
         
         alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        # FIXME currently cfg and dict are mixed  
+        self.alg: PPO = alg_class(actor_critic, device=self.device, 
+                                  rnd_cfg=rnd_cfg,
+                                  **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.empirical_normalization = self.cfg["empirical_normalization"]
+        self.obs_normalizer_keys = self.cfg.get("obs_normalizer_keys", None)
+        self.critic_obs_normalizer_keys = self.cfg.get("critic_obs_normalizer_keys", None)
 
         if isinstance(num_obs, int):
             num_obs = [num_obs]
         if isinstance(num_critic_obs, int):
             num_critic_obs = [num_critic_obs]
         if self.empirical_normalization:
-            self.obs_normalizer = EmpiricalNormalization(shape=num_obs, until=1.0e8).to(self.device)
-            self.critic_obs_normalizer = EmpiricalNormalization(shape=num_critic_obs, until=1.0e8).to(self.device)
+            self.obs_normalizer = EmpiricalNormalization(shape=num_obs, until=1.0e8,
+                                                         keys=self.obs_normalizer_keys).to(self.device)
+            self.critic_obs_normalizer = EmpiricalNormalization(shape=num_critic_obs,
+                                                                until=1.0e8,
+                                                                keys=self.critic_obs_normalizer_keys).to(self.device)
         else:
             self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
             self.critic_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
@@ -69,7 +96,8 @@ class OnPolicyRunner:
             num_obs,
             num_critic_obs,
             self.env.num_actions,
-            is_discrete
+            is_discrete,
+            num_rnd_state
         )
 
         # Log
@@ -142,7 +170,10 @@ class OnPolicyRunner:
         for it in range(start_iter, tot_iter):
             start = time.time()
             # Rollout
-            with torch.inference_mode():
+            # FIXME: we set no_grad instead of inference_mode
+            # to enable the use of the RND module inside rollout
+            # but this to be changed back to inference_mode to improve performance
+            with torch.no_grad():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
@@ -185,7 +216,7 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
 
-            mean_value_loss, mean_surrogate_loss, log_s = self.alg.update()
+            mean_value_loss, mean_surrogate_loss, mean_rnd_loss, log_s = self.alg.update()
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it

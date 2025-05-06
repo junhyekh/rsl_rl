@@ -12,7 +12,8 @@ from torch import nn
 class EmpiricalNormalization(nn.Module):
     """Normalize mean and variance of values based on empirical values."""
 
-    def __init__(self, shape, eps=1e-2, until=None):
+    def __init__(self, shape, eps=1e-2, until=None,
+                 keys: list[str] | None = None):
         """Initialize EmpiricalNormalization module.
 
         Args:
@@ -20,13 +21,18 @@ class EmpiricalNormalization(nn.Module):
             eps (float): Small value for stability.
             until (int or None): If this arg is specified, the link learns input values until the sum of batch sizes
             exceeds it.
+            keys (list[str] or None): If this arg is specified, the link learns input values only for the keys.
         """
         super().__init__()
         self.eps = eps
         self.until = until
+        if keys is not None:
+            assert isinstance(shape, Mapping), "shape must be a mapping if keys is specified"
         if isinstance(shape, Mapping):
             self.__keys = []
             for k,v in shape.items():
+                if keys is not None and k not in keys:
+                    continue
                 self.__keys.append(k)
                 if isinstance(v, int):
                     v = [v]
@@ -68,7 +74,9 @@ class EmpiricalNormalization(nn.Module):
             x = dict(x)
             if self.training:
                 self.update(x)
-            for k,v in x.items():
+            # for k,v in x.items():
+            for k in self.__keys:
+                v = x[k].clone()
                 _mean = getattr(self, f'{k}_mean')
                 _std = getattr(self, f'{k}_std')
                 x[k] = (v - _mean) / (_std + self.eps)
@@ -88,8 +96,9 @@ class EmpiricalNormalization(nn.Module):
             count_x = next(iter(x.values())).shape[0]
             self.count += count_x
             rate = count_x / self.count
-            for k,v in x.items():
-                
+            # for k,v in x.items():
+            for k in self.__keys:
+                v = x[k]
                 var_x = torch.var(v, dim=0, unbiased=False, keepdim=True)
                 mean_x = torch.mean(v, dim=0, keepdim=True)
 
@@ -116,4 +125,61 @@ class EmpiricalNormalization(nn.Module):
 
     @torch.jit.unused
     def inverse(self, y):
-        return y * (self._std + self.eps) + self._mean
+        if isinstance(y, Mapping):
+            return {k: y[k] * (getattr(self, f"{k}_std") + self.eps) 
+                    + getattr(self, f"{k}_mean")
+                    for k in self.__keys}
+        else:
+            return y * (self._std + self.eps) + self._mean
+
+class EmpiricalDiscountedVariationNormalization(nn.Module):
+    """Reward normalization from Pathak's large scale study on PPO.
+
+    Reward normalization. Since the reward function is non-stationary, it is useful to normalize
+    the scale of the rewards so that the value function can learn quickly. We did this by dividing
+    the rewards by a running estimate of the standard deviation of the sum of discounted rewards.
+    """
+
+    def __init__(self, shape, eps=1e-2, gamma=0.99, until=None):
+        super().__init__()
+
+        self.emp_norm = EmpiricalNormalization(shape, eps, until)
+        self.disc_avg = DiscountedAverage(gamma)
+
+    def forward(self, rew):
+        if self.training:
+            # update discounected rewards
+            avg = self.disc_avg.update(rew)
+
+            # update moments from discounted rewards
+            self.emp_norm.update(avg)
+
+        if self.emp_norm._std > 0:
+            return rew / self.emp_norm._std
+        else:
+            return rew
+        
+
+class DiscountedAverage:
+    r"""Discounted average of rewards.
+
+    The discounted average is defined as:
+
+    .. math::
+
+        \bar{R}_t = \gamma \bar{R}_{t-1} + r_t
+
+    Args:
+        gamma (float): Discount factor.
+    """
+
+    def __init__(self, gamma):
+        self.avg = None
+        self.gamma = gamma
+
+    def update(self, rew: torch.Tensor) -> torch.Tensor:
+        if self.avg is None:
+            self.avg = rew
+        else:
+            self.avg = self.avg * self.gamma + rew
+        return self.avg

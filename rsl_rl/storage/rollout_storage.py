@@ -49,12 +49,14 @@ class RolloutStorage:
             self.action_sigma = None
             self.hidden_states = None
             self.action_logit = None
+            self.rnd_state = None
 
         def clear(self):
             self.__init__()
 
     def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape,
                  is_discrete,
+                 rnd_state_shape=None,
                  device="cpu"):
         self.device = device
 
@@ -119,6 +121,22 @@ class RolloutStorage:
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
 
+        #rnd
+        if rnd_state_shape is not None:
+            if isinstance(rnd_state_shape, dict):
+                self.rnd_state = {k: torch.zeros(num_transitions_per_env,
+                                                num_envs,
+                                                *v,
+                                                device=self.device)
+                                for k,v in rnd_state_shape.items()}
+            else:
+                self.rnd_state = torch.zeros(num_transitions_per_env, 
+                                             num_envs, 
+                                             *rnd_state_shape,
+                                             device=self.device)
+        else:
+            self.rnd_state = None
+
         self.step = 0
 
     def add_transitions(self, transition: Transition):
@@ -138,6 +156,10 @@ class RolloutStorage:
         else:
             self.mu[self.step].copy_(transition.action_mean)
             self.sigma[self.step].copy_(transition.action_sigma)
+
+        if self.rnd_state is not None:
+            self.rnd_state[self.step].copy_(transition.rnd_state)
+
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -212,6 +234,11 @@ class RolloutStorage:
             old_mu = self.mu.flatten(0, 1)
             old_sigma = self.sigma.flatten(0, 1)
 
+        if self.rnd_state is not None:
+            rnd_state = self.rnd_state.flatten(0, 1)
+        else:
+            rnd_state = None
+
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
                 start = i * mini_batch_size
@@ -230,10 +257,11 @@ class RolloutStorage:
                 old_mu_batch = old_mu[batch_idx] if not self._is_discrete else None
                 old_sigma_batch = old_sigma[batch_idx] if not self._is_discrete else None
                 old_logit_batch = (old_logit[batch_idx] if self._is_discrete else None)
+                rnd_state_batch = rnd_state[batch_idx] if rnd_state is not None else None
                 yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,
                     None,
-                ), None, old_logit_batch
+                ), None, old_logit_batch, rnd_state_batch
 
     # for RNNs only
     def reccurent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -242,6 +270,11 @@ class RolloutStorage:
             padded_critic_obs_trajectories, _ = split_and_pad_trajectories(self.privileged_observations, self.dones)
         else:
             padded_critic_obs_trajectories = padded_obs_trajectories
+
+        if self.rnd_state is not None:
+            padded_rnd_state_trajectories, _ = split_and_pad_trajectories(self.rnd_state, self.dones)
+        else:
+            padded_rnd_state_trajectories = None
 
         mini_batch_size = self.num_envs // num_mini_batches
         for ep in range(num_epochs):
@@ -270,6 +303,11 @@ class RolloutStorage:
                 values_batch = self.values[:, start:stop]
                 old_actions_log_prob_batch = self.actions_log_prob[:, start:stop]
 
+                if padded_rnd_state_trajectories is not None:
+                    rnd_state_batch = padded_rnd_state_trajectories[:, start:stop]
+                else:
+                    rnd_state_batch = None
+
                 # reshape to [num_envs, time, num layers, hidden dim] (original shape: [time, num_layers, num_envs, hidden_dim])
                 # then take only time steps after dones (flattens num envs and time dimensions),
                 # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
@@ -293,6 +331,6 @@ class RolloutStorage:
                 yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     hid_a_batch,
                     hid_c_batch,
-                ), masks_batch, old_logit_batch
+                ), masks_batch, old_logit_batch, rnd_state_batch
 
                 first_traj = last_traj

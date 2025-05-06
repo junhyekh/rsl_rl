@@ -95,7 +95,7 @@ class FuserBlock(nn.Module):
     def forward(self, x: dict[str, th.Tensor]) -> th.Tensor:
         o = th.cat([v for v in x.values()], dim=-1)
         return self.network(o)
-    
+        
     
 #test code for extractor block
 def test_extractor_block():
