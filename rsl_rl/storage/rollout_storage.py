@@ -77,6 +77,7 @@ class RolloutStorage:
             actions: torch.Tensor | None = None,
             values: torch.Tensor | None = None,
             advantages: torch.Tensor | None = None,
+            aggregated_advantages: torch.Tensor | None = None,
             returns: torch.Tensor | None = None,
             old_actions_log_prob: torch.Tensor | None = None,
             old_distribution_params: tuple[torch.Tensor, ...] | None = None,
@@ -98,6 +99,9 @@ class RolloutStorage:
 
             self.advantages: torch.Tensor | None = advantages
             """Batch of advantage estimates (RL only)."""
+
+            self.aggregated_advantages: torch.Tensor | None = aggregated_advantages
+            """Batch of surrogate-loss advantages (RL only)."""
 
             self.returns: torch.Tensor | None = returns
             """Batch of return targets (RL only)."""
@@ -130,6 +134,7 @@ class RolloutStorage:
         obs: TensorDict,
         actions_shape: tuple[int, ...] | list[int],
         device: str = "cpu",
+        num_critics: int = 1,
     ) -> None:
         """Allocate rollout buffers for a specific training mode and batch shape."""
         self.training_type = training_type
@@ -137,6 +142,7 @@ class RolloutStorage:
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
         self.actions_shape = actions_shape
+        self.num_critics = num_critics if training_type == "rl" else 1
 
         # Core
         self.observations = TensorDict(
@@ -144,7 +150,7 @@ class RolloutStorage:
             batch_size=[num_transitions_per_env, num_envs],
             device=self.device,
         )
-        self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        self.rewards = torch.zeros(num_transitions_per_env, num_envs, self.num_critics, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
@@ -154,11 +160,12 @@ class RolloutStorage:
 
         # For reinforcement learning
         if training_type == "rl":
-            self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.values = torch.zeros(num_transitions_per_env, num_envs, self.num_critics, device=self.device)
             self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.distribution_params: tuple[torch.Tensor, ...] | None = None  # Lazily initialized on first transition
-            self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-            self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.returns = torch.zeros(num_transitions_per_env, num_envs, self.num_critics, device=self.device)
+            self.advantages = torch.zeros(num_transitions_per_env, num_envs, self.num_critics, device=self.device)
+            self.aggregated_advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
 
         # For recurrent networks
         self.saved_hidden_state_a = None
@@ -176,7 +183,7 @@ class RolloutStorage:
         # Core
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)  # type: ignore
-        self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
+        self.rewards[self.step].copy_(transition.rewards.view(-1, self.num_critics))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
         # For distillation
@@ -234,6 +241,7 @@ class RolloutStorage:
         returns = self.returns.flatten(0, 1)
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
+        aggregated_advantages = self.aggregated_advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
 
         for epoch in range(num_epochs):
@@ -249,6 +257,7 @@ class RolloutStorage:
                     actions=actions[batch_idx],
                     values=values[batch_idx],
                     advantages=advantages[batch_idx],
+                    aggregated_advantages=aggregated_advantages[batch_idx],
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
@@ -316,6 +325,7 @@ class RolloutStorage:
                     actions=self.actions[:, start:stop],
                     values=self.values[:, start:stop],
                     advantages=self.advantages[:, start:stop],
+                    aggregated_advantages=self.aggregated_advantages[:, start:stop],
                     returns=self.returns[:, start:stop],
                     old_actions_log_prob=self.actions_log_prob[:, start:stop],
                     old_distribution_params=tuple(p[:, start:stop] for p in self.distribution_params),  # type: ignore

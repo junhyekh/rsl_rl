@@ -14,7 +14,7 @@ from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
 from rsl_rl.extensions import RandomNetworkDistillation, resolve_rnd_config, resolve_symmetry_config
-from rsl_rl.models import MLPModel
+from rsl_rl.models import MLPModel, MultiCriticModel
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
@@ -29,13 +29,13 @@ class PPO:
     actor: MLPModel
     """The actor model."""
 
-    critic: MLPModel
+    critic: MLPModel | MultiCriticModel
     """The critic model."""
 
     def __init__(
         self,
         actor: MLPModel,
-        critic: MLPModel,
+        critic: MLPModel | MultiCriticModel,
         storage: RolloutStorage,
         num_learning_epochs: int = 5,
         num_mini_batches: int = 4,
@@ -58,6 +58,11 @@ class PPO:
         symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
+        # Multi-critic parameters
+        num_critics: int = 1,
+        reward_group_indices: list[list[int]] | None = None,
+        advantage_normalization: str = "independent",
+        critic_weights: list[float] | None = None,
     ) -> None:
         """Initialize the algorithm with models, storage, and optimization settings."""
         # Device-related parameters
@@ -135,6 +140,40 @@ class PPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        self.num_critics = num_critics
+        self.reward_group_indices = reward_group_indices
+        self.advantage_normalization = advantage_normalization
+        if critic_weights is None:
+            critic_weights = [1.0] * num_critics
+        self.critic_weights = critic_weights
+
+        if self.num_critics < 1:
+            raise ValueError(f"num_critics must be >= 1, got {self.num_critics}.")
+        if len(self.critic_weights) != self.num_critics:
+            raise ValueError(
+                f"critic_weights length ({len(self.critic_weights)}) must match num_critics ({self.num_critics})."
+            )
+        if self.advantage_normalization not in {"independent", "magnitude_preserved"}:
+            raise ValueError(
+                f"Unsupported advantage_normalization '{self.advantage_normalization}'. "
+                "Expected 'independent' or 'magnitude_preserved'."
+            )
+        if self.num_critics > 1:
+            if self.rnd is not None:
+                raise ValueError("Multi-critic PPO does not support RND.")
+            if self.symmetry is not None:
+                raise ValueError("Multi-critic PPO does not support symmetry augmentation.")
+            if self.normalize_advantage_per_mini_batch:
+                raise ValueError("Multi-critic PPO does not support mini-batch advantage normalization.")
+            if actor.is_recurrent or critic.is_recurrent:
+                raise ValueError("Multi-critic PPO does not support recurrent actor or critic models.")
+            if self.reward_group_indices is None:
+                raise ValueError("Multi-critic PPO requires reward_group_indices.")
+            if len(self.reward_group_indices) != self.num_critics:
+                raise ValueError(
+                    "reward_group_indices length "
+                    f"({len(self.reward_group_indices)}) must match num_critics ({self.num_critics})."
+                )
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Sample actions and store transition data."""
@@ -161,7 +200,14 @@ class PPO:
 
         # Record the rewards and dones
         # Note: We clone here because later on we bootstrap the rewards based on timeouts
-        self.transition.rewards = rewards.clone()
+        if self.num_critics > 1:
+            per_term_rewards = extras["per_term_rewards"].to(self.device)
+            per_critic_rewards = torch.zeros(per_term_rewards.shape[0], self.num_critics, device=self.device)
+            for critic_idx, term_indices in enumerate(self.reward_group_indices or []):
+                per_critic_rewards[:, critic_idx] = per_term_rewards[:, term_indices].sum(dim=-1)
+            self.transition.rewards = per_critic_rewards
+        else:
+            self.transition.rewards = rewards.clone()
         self.transition.dones = dones
 
         # Compute the intrinsic rewards and add to extrinsic rewards
@@ -173,10 +219,15 @@ class PPO:
 
         # Bootstrapping on time outs
         if "time_outs" in extras:
-            self.transition.rewards += self.gamma * torch.squeeze(
-                self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device),  # type: ignore
-                1,
-            )
+            if self.num_critics > 1:
+                self.transition.rewards += (
+                    self.gamma * self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device)  # type: ignore
+                )
+            else:
+                self.transition.rewards += self.gamma * torch.squeeze(
+                    self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device),  # type: ignore
+                    1,
+                )
 
         # Record the transition
         self.storage.add_transition(self.transition)
@@ -190,7 +241,7 @@ class PPO:
         # Compute value for the last step
         last_values = self.critic(obs).detach()
         # Compute returns and advantages
-        advantage = 0
+        advantage = torch.zeros_like(last_values)
         for step in reversed(range(st.num_transitions_per_env)):
             # If we are at the last step, bootstrap the return value
             next_values = last_values if step == st.num_transitions_per_env - 1 else st.values[step + 1]
@@ -204,9 +255,22 @@ class PPO:
             st.returns[step] = advantage + st.values[step]
         # Compute the advantages
         st.advantages = st.returns - st.values
-        # Normalize the advantages if per minibatch normalization is not used
-        if not self.normalize_advantage_per_mini_batch:
-            st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
+        if self.num_critics == 1:
+            # Normalize the advantages if per minibatch normalization is not used
+            if not self.normalize_advantage_per_mini_batch:
+                st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
+            st.aggregated_advantages = st.advantages
+        elif self.advantage_normalization == "independent":
+            for critic_idx in range(self.num_critics):
+                critic_adv = st.advantages[:, :, critic_idx]
+                st.advantages[:, :, critic_idx] = self.critic_weights[critic_idx] * (
+                    (critic_adv - critic_adv.mean()) / (critic_adv.std() + 1e-8)
+                )
+            st.aggregated_advantages = st.advantages.sum(dim=-1, keepdim=True)
+        else:
+            centered = st.advantages - st.advantages.mean(dim=(0, 1), keepdim=True)
+            pooled_std = torch.sqrt(centered.var(dim=(0, 1)).sum() + 1e-8)
+            st.aggregated_advantages = (centered / pooled_std).sum(dim=-1, keepdim=True)
 
     def update(self) -> dict[str, float]:
         """Run optimization epochs over stored batches and return mean losses."""
@@ -231,7 +295,9 @@ class PPO:
             # Check if we should normalize advantages per mini batch
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
-                    batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)  # type: ignore
+                    batch.aggregated_advantages = (  # type: ignore[assignment]
+                        batch.aggregated_advantages - batch.aggregated_advantages.mean()  # type: ignore[operator]
+                    ) / (batch.aggregated_advantages.std() + 1e-8)  # type: ignore[operator]
 
             # Perform symmetric augmentation
             if self.symmetry and self.symmetry["use_data_augmentation"]:
@@ -249,6 +315,7 @@ class PPO:
                 batch.old_actions_log_prob = batch.old_actions_log_prob.repeat(num_aug, 1)
                 batch.values = batch.values.repeat(num_aug, 1)
                 batch.advantages = batch.advantages.repeat(num_aug, 1)
+                batch.aggregated_advantages = batch.aggregated_advantages.repeat(num_aug, 1)
                 batch.returns = batch.returns.repeat(num_aug, 1)
 
             # Recompute actions log prob and entropy for current batch of transitions
@@ -295,20 +362,36 @@ class PPO:
 
             # Surrogate loss
             ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))  # type: ignore
-            surrogate = -torch.squeeze(batch.advantages) * ratio  # type: ignore
-            surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(  # type: ignore
+            surrogate = -torch.squeeze(batch.aggregated_advantages) * ratio  # type: ignore[arg-type]
+            surrogate_clipped = -torch.squeeze(batch.aggregated_advantages) * torch.clamp(  # type: ignore[arg-type]
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
             # Value function loss
-            if self.use_clipped_value_loss:
-                value_clipped = batch.values + (values - batch.values).clamp(-self.clip_param, self.clip_param)
-                value_losses = (values - batch.returns).pow(2)
-                value_losses_clipped = (value_clipped - batch.returns).pow(2)
-                value_loss = torch.max(value_losses, value_losses_clipped).mean()
+            if self.num_critics > 1:
+                value_loss = 0.0
+                for critic_idx in range(self.num_critics):
+                    critic_values = values[:, critic_idx : critic_idx + 1]
+                    critic_returns = batch.returns[:, critic_idx : critic_idx + 1]
+                    if self.use_clipped_value_loss:
+                        critic_old_values = batch.values[:, critic_idx : critic_idx + 1]
+                        critic_value_clipped = critic_old_values + (
+                            critic_values - critic_old_values
+                        ).clamp(-self.clip_param, self.clip_param)
+                        critic_value_losses = (critic_values - critic_returns).pow(2)
+                        critic_value_losses_clipped = (critic_value_clipped - critic_returns).pow(2)
+                        value_loss += torch.max(critic_value_losses, critic_value_losses_clipped).mean()
+                    else:
+                        value_loss += (critic_returns - critic_values).pow(2).mean()
             else:
-                value_loss = (batch.returns - values).pow(2).mean()
+                if self.use_clipped_value_loss:
+                    value_clipped = batch.values + (values - batch.values).clamp(-self.clip_param, self.clip_param)
+                    value_losses = (values - batch.returns).pow(2)
+                    value_losses_clipped = (value_clipped - batch.returns).pow(2)
+                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                else:
+                    value_loss = (batch.returns - values).pow(2).mean()
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
 
@@ -453,6 +536,17 @@ class PPO:
                 "rnd": True,
             }
 
+        if load_cfg.get("critic") and "critic_state_dict" in loaded_dict:
+            ckpt_keys = set(loaded_dict["critic_state_dict"].keys())
+            ckpt_is_multi = any(key.startswith("trunk.") or key.startswith("heads.") for key in ckpt_keys)
+            model_is_multi = isinstance(self.critic, MultiCriticModel)
+            if ckpt_is_multi != model_is_multi:
+                raise ValueError(
+                    f"Checkpoint critic architecture ({'multi-critic' if ckpt_is_multi else 'single-critic'}) "
+                    f"does not match current model ({'multi-critic' if model_is_multi else 'single-critic'}). "
+                    "Use load_cfg={'actor': True, 'critic': False} to load actor weights only."
+                )
+
         # Load the specified models
         if load_cfg.get("actor"):
             self.actor.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
@@ -472,10 +566,19 @@ class PPO:
     @staticmethod
     def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> PPO:
         """Construct the PPO algorithm."""
+        mc_cfg = cfg.get("multi_critic")
+        use_multi_critic = mc_cfg is not None and mc_cfg.get("enabled", False)
+
         # Resolve class callables
         alg_class: type[PPO] = resolve_callable(cfg["algorithm"].pop("class_name"))  # type: ignore
         actor_class: type[MLPModel] = resolve_callable(cfg["actor"].pop("class_name"))  # type: ignore
-        critic_class: type[MLPModel] = resolve_callable(cfg["critic"].pop("class_name"))  # type: ignore
+        critic_class_spec = cfg["critic"].pop("class_name", "MLPModel")
+        critic_class: type[MLPModel] = resolve_callable(critic_class_spec)  # type: ignore
+        if use_multi_critic and critic_class is not MLPModel:
+            raise ValueError(
+                f"Multi-critic only supports MLPModel critic, got '{critic_class_spec}'. "
+                "CNN/vision critics are not supported with multi-critic."
+            )
 
         # Resolve observation groups
         default_sets = ["actor", "critic"]
@@ -494,11 +597,37 @@ class PPO:
         print(f"Actor Model: {actor}")
         if cfg["algorithm"].pop("share_cnn_encoders", None):  # Share CNN encoders between actor and critic
             cfg["critic"]["cnns"] = actor.cnns  # type: ignore
-        critic: MLPModel = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
+        if use_multi_critic:
+            critic = MultiCriticModel(
+                obs,
+                cfg["obs_groups"],
+                "critic",
+                num_critics=mc_cfg["num_critics"],
+                trunk_hidden_dims=mc_cfg["trunk_hidden_dims"],
+                head_hidden_dims=mc_cfg["head_hidden_dims"],
+                activation=cfg["critic"].get("activation", "elu"),
+                obs_normalization=cfg["critic"].get("obs_normalization", False),
+            ).to(device)
+            cfg["algorithm"]["num_critics"] = mc_cfg["num_critics"]
+            cfg["algorithm"]["reward_group_indices"] = mc_cfg["reward_group_indices"]
+            cfg["algorithm"]["advantage_normalization"] = mc_cfg["advantage_normalization"]
+            cfg["algorithm"]["critic_weights"] = mc_cfg.get("critic_weights")
+            num_critics = mc_cfg["num_critics"]
+        else:
+            critic = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
+            num_critics = 1
         print(f"Critic Model: {critic}")
 
         # Initialize the storage
-        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
+        storage = RolloutStorage(
+            "rl",
+            env.num_envs,
+            cfg["num_steps_per_env"],
+            obs,
+            [env.num_actions],
+            device,
+            num_critics=num_critics,
+        )
 
         # Initialize the algorithm
         alg: PPO = alg_class(actor, critic, storage, device=device, **cfg["algorithm"], multi_gpu_cfg=cfg["multi_gpu"])

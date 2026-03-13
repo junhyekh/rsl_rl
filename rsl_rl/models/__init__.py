@@ -7,10 +7,12 @@
 
 from .cnn_model import CNNModel
 from .mlp_model import MLPModel
+from .multi_critic import MultiCriticModel
 from .rnn_model import RNNModel
 
 __all__ = [
     "CNNModel",
     "MLPModel",
+    "MultiCriticModel",
     "RNNModel",
 ]

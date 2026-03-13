@@ -115,6 +115,35 @@ class TestMiniBatchGenerator:
                 "Actions and values should index the same transitions"
             )
 
+    def test_multi_critic_batches_include_aggregated_advantages(self) -> None:
+        """Multi-critic storage should preserve both per-critic and aggregated advantages."""
+        obs = make_obs(NUM_ENVS, OBS_DIM)
+        storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS], num_critics=2)
+
+        for step in range(NUM_STEPS):
+            t = RolloutStorage.Transition()
+            t.observations = obs
+            t.hidden_states = (None, None)
+            t.actions = torch.full((NUM_ENVS, NUM_ACTIONS), float(step))
+            t.values = torch.full((NUM_ENVS, 2), float(step))
+            t.actions_log_prob = torch.zeros(NUM_ENVS)
+            t.distribution_params = (
+                torch.zeros(NUM_ENVS, NUM_ACTIONS),
+                torch.ones(NUM_ENVS, NUM_ACTIONS),
+            )
+            t.rewards = torch.full((NUM_ENVS, 2), float(step))
+            t.dones = torch.zeros(NUM_ENVS)
+            storage.add_transition(t)
+
+        storage.returns = torch.randn_like(storage.returns)
+        storage.advantages = torch.randn_like(storage.advantages)
+        storage.aggregated_advantages = torch.randn(NUM_STEPS, NUM_ENVS, 1)
+
+        batch = next(storage.mini_batch_generator(2, num_epochs=1))
+
+        assert batch.advantages.shape[-1] == 2
+        assert batch.aggregated_advantages.shape[-1] == 1
+
 
 class TestRecurrentMiniBatchGenerator:
     """Tests for ``recurrent_mini_batch_generator`` — trajectory counting, env/trajectory alignment."""
