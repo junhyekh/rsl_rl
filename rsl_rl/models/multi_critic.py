@@ -1,11 +1,52 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
 from rsl_rl.modules import EmpiricalNormalization, HiddenState, MLP
 from rsl_rl.utils import resolve_nn_activation, unpad_trajectories
+
+
+class _BatchedMLPHeads(nn.Module):
+    """Apply the same MLP head structure to K critics in parallel."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: tuple[int, ...],
+        num_heads: int,
+        activation: str,
+    ) -> None:
+        super().__init__()
+        self.activation = resolve_nn_activation(activation)
+        layer_dims = (input_dim, *hidden_dims, 1)
+        self.weights = nn.ParameterList()
+        self.biases = nn.ParameterList()
+        for in_dim, out_dim in zip(layer_dims[:-1], layer_dims[1:], strict=False):
+            weight = nn.Parameter(torch.empty(num_heads, out_dim, in_dim))
+            bias = nn.Parameter(torch.empty(num_heads, out_dim))
+            self.weights.append(weight)
+            self.biases.append(bias)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        for weight, bias in zip(self.weights, self.biases, strict=False):
+            for head_idx in range(weight.shape[0]):
+                nn.init.kaiming_uniform_(weight[head_idx], a=math.sqrt(5))
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(weight[head_idx])
+                bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+                nn.init.uniform_(bias[head_idx], -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.unsqueeze(1).expand(-1, self.weights[0].shape[0], -1)
+        for layer_idx, (weight, bias) in enumerate(zip(self.weights, self.biases, strict=False)):
+            x = torch.einsum("bki,koi->bko", x, weight) + bias.unsqueeze(0)
+            if layer_idx < len(self.weights) - 1:
+                x = self.activation(x)
+        return x.squeeze(-1)
 
 
 class MultiCriticModel(nn.Module):
@@ -58,9 +99,7 @@ class MultiCriticModel(nn.Module):
                 activation,
                 last_activation=activation,
             )
-        self.heads = nn.ModuleList(
-            [MLP(trunk_out_dim, 1, head_hidden_dims, activation) for _ in range(num_critics)]
-        )
+        self.batched_heads = _BatchedMLPHeads(trunk_out_dim, head_hidden_dims, num_critics, activation)
 
     def forward(
         self,
@@ -73,7 +112,7 @@ class MultiCriticModel(nn.Module):
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         latent = self.get_latent(obs)
         trunk_output = self.trunk(latent)
-        return torch.cat([head(trunk_output) for head in self.heads], dim=-1)
+        return self.batched_heads(trunk_output)
 
     def get_latent(self, obs: TensorDict) -> torch.Tensor:
         obs_list = [obs[obs_group] for obs_group in self.obs_groups]

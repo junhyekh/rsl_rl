@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 from rsl_rl.models import MultiCriticModel
 from tests.conftest import make_obs
@@ -24,6 +25,34 @@ def test_multi_critic_model_returns_k_values() -> None:
     values = critic(obs)
 
     assert values.shape == (NUM_ENVS, 3)
+
+
+def test_multi_critic_model_matches_reference_per_head_mlp() -> None:
+    obs = make_obs(NUM_ENVS, OBS_DIM)
+    critic = MultiCriticModel(
+        obs,
+        OBS_GROUPS,
+        "critic",
+        num_critics=3,
+        trunk_hidden_dims=(32, 16),
+        head_hidden_dims=(8, 4),
+    )
+
+    values = critic(obs)
+    trunk_output = critic.trunk(critic.get_latent(obs))
+    reference_outputs = []
+    for critic_idx in range(critic.num_critics):
+        head_output = trunk_output
+        for layer_idx, (weight, bias) in enumerate(
+            zip(critic.batched_heads.weights, critic.batched_heads.biases, strict=False)
+        ):
+            head_output = F.linear(head_output, weight[critic_idx], bias[critic_idx])
+            if layer_idx < len(critic.batched_heads.weights) - 1:
+                head_output = critic.batched_heads.activation(head_output)
+        reference_outputs.append(head_output)
+    reference = torch.cat(reference_outputs, dim=-1)
+
+    torch.testing.assert_close(values, reference)
 
 
 def test_multi_critic_model_supports_single_layer_trunk() -> None:

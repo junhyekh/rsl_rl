@@ -78,6 +78,7 @@ def _make_multi_critic_ppo(**overrides: object) -> tuple[PPO, TensorDict]:
         num_critics=2,
         reward_group_indices=[[0, 1], [2, 3]],
         critic_weights=[2.0, 0.5],
+        reward_scale=1.0,
     )
     defaults.update(overrides)
     return PPO(actor, critic, storage, **defaults), obs
@@ -146,7 +147,7 @@ def test_multi_critic_magnitude_preserved_normalization() -> None:
 
 
 def test_multi_critic_process_env_step_maps_rewards() -> None:
-    ppo, obs = _make_multi_critic_ppo()
+    ppo, obs = _make_multi_critic_ppo(reward_scale=0.5)
 
     ppo.act(obs)
     stored_values = ppo.transition.values.clone()
@@ -161,7 +162,7 @@ def test_multi_critic_process_env_step_maps_rewards() -> None:
         extras=extras,
     )
 
-    expected = torch.tensor([[3.0, 30.0], [7.0, 70.0]])
+    expected = 0.5 * torch.tensor([[3.0, 30.0], [7.0, 70.0]])
     expected[0] += ppo.gamma * stored_values[0]
 
     torch.testing.assert_close(ppo.storage.rewards[0], expected)
@@ -179,6 +180,19 @@ def test_multi_critic_load_rejects_single_critic_checkpoint() -> None:
 
     with pytest.raises(ValueError, match="does not match current model"):
         multi_ppo.load(checkpoint, {"actor": False, "critic": True, "optimizer": False, "iteration": False}, True)
+
+
+def test_multi_critic_load_rejects_legacy_multi_critic_checkpoint() -> None:
+    multi_ppo, _ = _make_multi_critic_ppo()
+    legacy_checkpoint = {
+        "critic_state_dict": {
+            "trunk.0.weight": torch.zeros(1),
+            "heads.0.0.weight": torch.zeros(1),
+        }
+    }
+
+    with pytest.raises(ValueError, match="legacy multi-critic head layout"):
+        multi_ppo.load(legacy_checkpoint, {"actor": False, "critic": True, "optimizer": False, "iteration": False}, True)
 
 
 def test_construct_algorithm_rejects_non_mlp_multi_critic() -> None:

@@ -63,6 +63,7 @@ class PPO:
         reward_group_indices: list[list[int]] | None = None,
         advantage_normalization: str = "independent",
         critic_weights: list[float] | None = None,
+        reward_scale: float = 1.0,
     ) -> None:
         """Initialize the algorithm with models, storage, and optimization settings."""
         # Device-related parameters
@@ -143,9 +144,11 @@ class PPO:
         self.num_critics = num_critics
         self.reward_group_indices = reward_group_indices
         self.advantage_normalization = advantage_normalization
+        self.reward_scale = reward_scale
         if critic_weights is None:
             critic_weights = [1.0] * num_critics
         self.critic_weights = critic_weights
+        self.reward_group_matrix: torch.Tensor | None = None
 
         if self.num_critics < 1:
             raise ValueError(f"num_critics must be >= 1, got {self.num_critics}.")
@@ -174,6 +177,11 @@ class PPO:
                     "reward_group_indices length "
                     f"({len(self.reward_group_indices)}) must match num_critics ({self.num_critics})."
                 )
+            num_reward_terms = max((max(group) for group in self.reward_group_indices if group), default=-1) + 1
+            reward_group_matrix = torch.zeros(num_reward_terms, self.num_critics, device=self.device)
+            for critic_idx, term_indices in enumerate(self.reward_group_indices):
+                reward_group_matrix[term_indices, critic_idx] = 1.0
+            self.reward_group_matrix = reward_group_matrix
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Sample actions and store transition data."""
@@ -201,10 +209,12 @@ class PPO:
         # Record the rewards and dones
         # Note: We clone here because later on we bootstrap the rewards based on timeouts
         if self.num_critics > 1:
-            per_term_rewards = extras["per_term_rewards"].to(self.device)
-            per_critic_rewards = torch.zeros(per_term_rewards.shape[0], self.num_critics, device=self.device)
-            for critic_idx, term_indices in enumerate(self.reward_group_indices or []):
-                per_critic_rewards[:, critic_idx] = per_term_rewards[:, term_indices].sum(dim=-1)
+            per_term_rewards = extras["per_term_rewards"]
+            if per_term_rewards.device != self.transition.values.device:  # type: ignore[union-attr]
+                per_term_rewards = per_term_rewards.to(self.device)
+            per_critic_rewards = per_term_rewards @ self.reward_group_matrix  # type: ignore[operator]
+            if self.reward_scale != 1.0:
+                per_critic_rewards = per_critic_rewards * self.reward_scale
             self.transition.rewards = per_critic_rewards
         else:
             self.transition.rewards = rewards.clone()
@@ -538,8 +548,18 @@ class PPO:
 
         if load_cfg.get("critic") and "critic_state_dict" in loaded_dict:
             ckpt_keys = set(loaded_dict["critic_state_dict"].keys())
-            ckpt_is_multi = any(key.startswith("trunk.") or key.startswith("heads.") for key in ckpt_keys)
             model_is_multi = isinstance(self.critic, MultiCriticModel)
+            ckpt_uses_legacy_multi = any(key.startswith("heads.") for key in ckpt_keys)
+            ckpt_is_multi = any(
+                key.startswith("trunk.") or key.startswith("heads.") or key.startswith("batched_heads.")
+                for key in ckpt_keys
+            )
+            if model_is_multi and ckpt_uses_legacy_multi:
+                raise ValueError(
+                    "Checkpoint critic uses the legacy multi-critic head layout and cannot be resumed with the "
+                    "current vectorized implementation. Use load_cfg={'actor': True, 'critic': False} to load "
+                    "actor weights only."
+                )
             if ckpt_is_multi != model_is_multi:
                 raise ValueError(
                     f"Checkpoint critic architecture ({'multi-critic' if ckpt_is_multi else 'single-critic'}) "
@@ -612,6 +632,7 @@ class PPO:
             cfg["algorithm"]["reward_group_indices"] = mc_cfg["reward_group_indices"]
             cfg["algorithm"]["advantage_normalization"] = mc_cfg["advantage_normalization"]
             cfg["algorithm"]["critic_weights"] = mc_cfg.get("critic_weights")
+            cfg["algorithm"]["reward_scale"] = mc_cfg.get("reward_scale", 1.0)
             num_critics = mc_cfg["num_critics"]
         else:
             critic = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
